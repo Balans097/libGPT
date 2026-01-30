@@ -26,7 +26,7 @@ Work in progress! Not for using.
 | `attention.nim`   | Механизмы внимания (в первую очередь causal multi-head) | scaledDotProductAttention, MultiHeadAttention, causal mask |
 | `layers.nim`      | Основные строительные блоки трансформера                | TransformerBlock / DecoderLayer, FeedForward, LayerNorm    |
 | `model.nim`       | Главная модель GPT                                      | GPTConfig, GPTModel, forward, generate, load/save          |
-| `generation.nim`  | Алгоритмы генерации текста                              | sample, top_k, top_p, temperature, greedy, beam search (?)|
+| `generation.nim`  | Алгоритмы генерации текста                              | sample, top_k, top_p, temperature, greedy, beam search|
 | `loss.nim`        | Функции потерь                                          | crossEntropyLoss, label smoothing (возможно)               |
 | `training.nim`    | Логика обучения модели                                  | train_step, Trainer / Loop, optimizer calls, gradient calc |
 | `utils.nim`       | Вспомогательные утилиты                                 | log, random, tensor ops, save/load weights, metrics        |
