@@ -1371,7 +1371,7 @@ MIT License
 ## Контакты
 
 **Автор:** github.com/Balans097  
-**E-mail:** vasil.minsk@yahoo.com
+**E-mail:** vasil.minsk@yahoo.com  
 **Версия:** 0.5  
 **Дата:** 2026-01-31
 
