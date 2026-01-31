@@ -362,6 +362,16 @@ proc initCache*(maxSize: int): Table[string, seq[int]] =
   result = initTable[string, seq[int]]()
 
 
+proc clearCache*(tokenizer: var Tokenizer) =
+  ## Очищает кэш токенизаций и сбрасывает счётчики попаданий/промахов
+  clear(tokenizer.cache)
+  tokenizer.cacheHits = 0
+  tokenizer.cacheMisses = 0
+
+
+
+
+
 #==============================================================================
 # BYTE-LEVEL BPE TRAINING (GPT-2/3 STYLE)
 #==============================================================================
@@ -732,11 +742,16 @@ proc trainSentencePiece*(corpus: seq[string],
   let words = splitIntoWords(text)
   var ngramCounts = initCountTable[string]()
   
+  # SentencePiece: добавляем ▁ в начало слов и обрабатываем n-граммы
   for word in words:
-    let runeLen = word.runeLen
-    for n in 2..min(runeLen, 10):
+    # Добавляем ▁ к началу слова (пробел-маркер)
+    let wordWithSpace = "▁" & word
+    let runeLen = wordWithSpace.runeLen
+    
+    # Считаем n-граммы включая ▁
+    for n in 1..min(runeLen, 10):
       for start in 0..runeLen - n:
-        let ngram = word.runeSubStr(start, n)
+        let ngram = wordWithSpace.runeSubStr(start, n)
         ngramCounts.inc(ngram)
   
   # Добавляем частые n-граммы
@@ -875,26 +890,31 @@ proc tokenize*(text: string,
           inc start
   
   of tkSentencePiece:
-    # Упрощённый unigram tokenization
-    var i = 0
-    let runeLen = text.runeLen
+    # Упрощённый unigram tokenization с поддержкой ▁
+    let words = splitIntoWords(text)
     
-    while i < runeLen:
-      var bestLen = 1
-      var bestScore = -1000.0
+    for wordIdx, word in words:
+      # Добавляем ▁ в начало слова (пробел-маркер)
+      let wordWithSpace = "▁" & word
+      var i = 0
+      let runeLen = wordWithSpace.runeLen
       
-      for length in countdown(min(10, runeLen - i), 1):
-        let substr = text.runeSubStr(i, length)
-        if substr in tokenizer.vocab:
-          let score = tokenizer.scores.getOrDefault(substr, -1000.0)
-          if score > bestScore:
-            bestScore = score
-            bestLen = length
-      
-      let substr = text.runeSubStr(i, bestLen)
-      let tokenId = tokenizer.vocab.getOrDefault(substr, tokenizer.getUnkTokenId())
-      result.add(tokenId)
-      i += bestLen
+      while i < runeLen:
+        var bestLen = 1
+        var bestScore = -1000.0
+        
+        for length in countdown(min(10, runeLen - i), 1):
+          let substr = wordWithSpace.runeSubStr(i, length)
+          if substr in tokenizer.vocab:
+            let score = tokenizer.scores.getOrDefault(substr, -1000.0)
+            if score > bestScore:
+              bestScore = score
+              bestLen = length
+        
+        let substr = wordWithSpace.runeSubStr(i, bestLen)
+        let tokenId = tokenizer.vocab.getOrDefault(substr, tokenizer.getUnkTokenId())
+        result.add(tokenId)
+        i += bestLen
   
   if addSpecialTokens:
     result.add(tokenizer.getEosTokenId())
@@ -1149,6 +1169,10 @@ proc decode*(tokenizer: Tokenizer,
       if tokenizer.kind == tkWordPiece and token.startsWith(tokenizer.continuingSubwordPrefix):
         token = token[tokenizer.continuingSubwordPrefix.len..^1]
       
+      # Для SentencePiece заменяем ▁ на пробелы
+      if tokenizer.kind == tkSentencePiece:
+        token = token.replace("▁", " ")
+      
       result.add(token)
     else:
       result.add(tokenizer.specialTokens.unkToken)
@@ -1156,6 +1180,12 @@ proc decode*(tokenizer: Tokenizer,
   # Нормализуем пробелы для не-SentencePiece
   if tokenizer.kind != tkSentencePiece and tokenizer.kind != tkByteLevelBPE:
     result = result.replace("  ", " ")
+  
+  # Для SentencePiece убираем начальный пробел и множественные пробелы
+  if tokenizer.kind == tkSentencePiece:
+    result = result.strip()
+    while "  " in result:
+      result = result.replace("  ", " ")
 
 
 #==============================================================================
@@ -1263,8 +1293,8 @@ proc pruneVocabulary*(tokenizer: var Tokenizer,
       if keepSpecialTokens and token in tokenizer.specialTokenIds:
         continue
       toRemove.incl(token)
-  
-  result = toRemove.len
+
+  result = len(toRemove)
   
   # Перестраиваем словарь
   var newVocab = initTable[string, int]()
@@ -2097,13 +2127,13 @@ proc validateTokenizer*(tokenizer: Tokenizer): seq[string] =
 
 when isMainModule:
   #============================================================================
-  # КОМПЛЕКСНОЕ ТЕСТИРОВАНИЕ БИБЛИОТЕКИ ТОКЕНИЗАЦИИ v1.0.0
+  # КОМПЛЕКСНОЕ ТЕСТИРОВАНИЕ БИБЛИОТЕКИ ТОКЕНИЗАЦИИ
   #============================================================================
   
   randomize()
   
   echo "╔" & "═".repeat(70) & "╗"
-  echo "║  КОМПЛЕКСНОЕ ТЕСТИРОВАНИЕ БИБЛИОТЕКИ ТОКЕНИЗАЦИИ v1.0.0      ║"
+  echo "║           КОМПЛЕКСНОЕ ТЕСТИРОВАНИЕ БИБЛИОТЕКИ ТОКЕНИЗАЦИИ            ║"
   echo "╚" & "═".repeat(70) & "╝"
   echo ""
   echo "Дата запуска: ", now().format("yyyy-MM-dd HH:mm:ss")
@@ -2142,7 +2172,7 @@ when isMainModule:
     )
     echo ""
     echo "╔" & "═".repeat(70) & "╗"
-    echo "║  ", name.alignLeft(66), "║"
+    echo "║  ", alignLeft(name, 68), "║"
     echo "╚" & "═".repeat(70) & "╝"
 
   proc endTestGroup() =
@@ -2188,7 +2218,7 @@ when isMainModule:
   #============================================================================
   const FN = "../Тексты и книги/Базовый текст.txt"
   let corpus = split(readFile(FN), '\n')
-  echo typeof(corpus), ' ', len(corpus)
+
   const testSentences = @[
     "Простое предложение для тестирования.",
     "Это более длинное предложение с большим количеством слов для проверки.",
@@ -2208,7 +2238,7 @@ when isMainModule:
     startTestGroup("ГРУППА 1: ТЕСТЫ BPE (BYTE PAIR ENCODING)")
     
     echo "\n→ Создание и обучение BPE токенизатора..."
-    var bpeTokenizer = trainBPE(testCorpus, vocabSize = 150, minFreq = 1)
+    var bpeTokenizer = trainBPE(corpus, vocabSize = 150, minFrequency = 1)
     
     test("1.1 Размер словаря BPE",
          bpeTokenizer.vocab.len > 0 and bpeTokenizer.vocab.len <= 150,
@@ -2258,7 +2288,7 @@ when isMainModule:
     test("1.12 Идентичность токенизации после загрузки",
          tokensOriginal == tokensLoaded)
     
-    let metrics = getMetrics(bpeTokenizer, testCorpus)
+    let metrics = getMetrics(bpeTokenizer, corpus)
     test("1.13 Вычисление метрик - размер словаря",
          metrics.vocabSize > 0)
     test("1.14 Вычисление метрик - коэффициент сжатия",
@@ -2277,7 +2307,7 @@ when isMainModule:
     startTestGroup("ГРУППА 2: ТЕСТЫ WORDPIECE")
     
     echo "\n→ Создание и обучение WordPiece токенизатора..."
-    var wpTokenizer = trainWordPiece(testCorpus, vocabSize = 150, minFreq = 1)
+    var wpTokenizer = trainWordPiece(corpus, vocabSize = 150, minFrequency = 1)
     
     test("2.1 Тип токенизатора WordPiece",
          wpTokenizer.kind == tkWordPiece)
@@ -2320,7 +2350,7 @@ when isMainModule:
       test("2.9 Согласованность encode-decode для: " & sentence[0..min(20, sentence.len-1)],
            normalized1 == normalized2 or normalized2.contains(normalized1[0..min(5, normalized1.len-1)]))
     
-    let metrics = getMetrics(wpTokenizer, testCorpus)
+    let metrics = getMetrics(wpTokenizer, corpus)
     test("2.10 Метрики - утилизация словаря",
          metrics.vocabUtilization >= 0.0 and metrics.vocabUtilization <= 1.0)
     
@@ -2334,7 +2364,7 @@ when isMainModule:
     startTestGroup("ГРУППА 3: ТЕСТЫ SENTENCEPIECE")
     
     echo "\n→ Создание и обучение SentencePiece токенизатора..."
-    var spTokenizer = trainSentencePiece(testCorpus, vocabSize = 150)
+    var spTokenizer = trainSentencePiece(corpus, vocabSize = 150)
     
     test("3.1 Тип токенизатора SentencePiece",
          spTokenizer.kind == tkSentencePiece)
@@ -2378,7 +2408,7 @@ when isMainModule:
     test("3.9 Консистентность encode-decode",
          norm1 == norm2 or norm2.contains(norm1[0..min(3, norm1.len-1)]))
     
-    let metrics = getMetrics(spTokenizer, testCorpus)
+    let metrics = getMetrics(spTokenizer, corpus)
     test("3.10 Метрики - коэффициент сжатия",
          metrics.compressionRatio > 0.0)
     
@@ -2392,7 +2422,7 @@ when isMainModule:
     startTestGroup("ГРУППА 4: ТЕСТЫ BYTE-LEVEL BPE (GPT-2 STYLE)")
     
     echo "\n→ Создание и обучение ByteLevel BPE токенизатора..."
-    var blbpeTokenizer = trainByteLevelBPE(testCorpus, vocabSize = 200)
+    var blbpeTokenizer = trainByteLevelBPE(corpus, vocabSize = 200)
     
     test("4.1 Тип токенизатора ByteLevelBPE",
          blbpeTokenizer.kind == tkByteLevelBPE)
@@ -2472,7 +2502,7 @@ when isMainModule:
   proc testAdditionalFunctions() =
     startTestGroup("ГРУППА 5: ТЕСТЫ ДОПОЛНИТЕЛЬНЫХ ФУНКЦИЙ")
     
-    var tokenizer = trainBPE(testCorpus, vocabSize = 150)
+    var tokenizer = trainBPE(corpus, vocabSize = 150)
     
     let htmlText = "<div>Текст с <b>HTML</b> тегами</div>"
     let cleaned = cleanText(htmlText, removeHtml = true)
@@ -2534,12 +2564,12 @@ when isMainModule:
     test("5.13 validateTokenizer - проверка проходит",
          validationResults.len > 0)
     
-    var wpTokenizer = trainWordPiece(testCorpus, vocabSize = 150)
-    let comparison = compareTokenizers(@[tokenizer, wpTokenizer], "Тестовый текст")
+    var wpTokenizer = trainWordPiece(corpus, vocabSize = 150)
+    let comparison = compareTokenizers("Тестовый текст", @[tokenizer, wpTokenizer])
     test("5.14 compareTokenizers - сравнение работает",
          comparison.len == 2)
     
-    let analysis = analyzeVocabulary(tokenizer, testCorpus, topN = 5)
+    let analysis = analyzeVocabulary(tokenizer, corpus, topN = 5)
     test("5.15 analyzeVocabulary - размер словаря",
          analysis.vocabSize > 0)
     test("5.16 analyzeVocabulary - средняя длина токена",
@@ -2548,7 +2578,7 @@ when isMainModule:
          analysis.mostFrequent.len <= 5)
     
     let originalSize = tokenizer.vocab.len
-    pruneVocabulary(tokenizer, minFrequency = 2, corpus = testCorpus)
+    discard pruneVocabulary(tokenizer, minFrequency = 2, corpus = corpus)
     test("5.18 pruneVocabulary - уменьшение размера словаря",
          tokenizer.vocab.len <= originalSize)
     
@@ -2570,7 +2600,7 @@ when isMainModule:
   proc testCachingAndPerformance() =
     startTestGroup("ГРУППА 6: ТЕСТЫ КЭШИРОВАНИЯ И ПРОИЗВОДИТЕЛЬНОСТИ")
     
-    var tokenizer = trainByteLevelBPE(testCorpus, vocabSize = 200)
+    var tokenizer = trainByteLevelBPE(corpus, vocabSize = 200)
     tokenizer.cacheMaxSize = 100
     
     test("6.1 Кэш изначально пуст",
@@ -2618,7 +2648,7 @@ when isMainModule:
     test("6.7 Batch processing завершается за разумное время",
          batchTime < 1.0)
     
-    let metrics = getMetrics(tokenizer, testCorpus)
+    let metrics = getMetrics(tokenizer, corpus)
     test("6.8 Метрики - скорость токенизации измерена",
          metrics.tokensPerSecond > 0.0)
     
@@ -2631,7 +2661,7 @@ when isMainModule:
   proc testDropoutAndRegularization() =
     startTestGroup("ГРУППА 7: ТЕСТЫ BPE-DROPOUT И РЕГУЛЯРИЗАЦИИ")
     
-    var tokenizer = trainByteLevelBPE(testCorpus, vocabSize = 200)
+    var tokenizer = trainByteLevelBPE(corpus, vocabSize = 200)
     let testText = "Тестовое предложение для проверки dropout"
     
     let originalTokens = tokenize(testText, tokenizer, addSpecialTokens = false)
@@ -2680,7 +2710,7 @@ when isMainModule:
   proc testEdgeCases() =
     startTestGroup("ГРУППА 8: ТЕСТЫ СПЕЦИАЛЬНЫХ СЛУЧАЕВ")
     
-    var tokenizer = trainBPE(testCorpus, vocabSize = 150)
+    var tokenizer = trainBPE(corpus, vocabSize = 150)
     
     let emptyTokens = tokenize("", tokenizer, addSpecialTokens = false)
     test("8.1 Токенизация пустой строки",
@@ -2809,7 +2839,7 @@ when isMainModule:
       echo "╚" & "═".repeat(70) & "╝"
     else:
       echo "╔" & "═".repeat(70) & "╗"
-      echo "║  ⚠️  ОБНАРУЖЕНЫ ПРОВАЛЕННЫЕ ТЕСТЫ: ", totalFailed.align(27), " ║"
+      echo "║  ⚠️  ОБНАРУЖЕНЫ ПРОВАЛЕННЫЕ ТЕСТЫ: ", align($totalFailed, 27), " ║"
       echo "╚" & "═".repeat(70) & "╝"
     echo ""
 
@@ -2825,10 +2855,10 @@ when isMainModule:
     echo ""
     
     echo "→ Обучение токенизаторов..."
-    var bpeTokenizer = trainBPE(testCorpus, vocabSize = 150)
-    var wpTokenizer = trainWordPiece(testCorpus, vocabSize = 150)
-    var spTokenizer = trainSentencePiece(testCorpus, vocabSize = 150)
-    var blbpeTokenizer = trainByteLevelBPE(testCorpus, vocabSize = 200)
+    var bpeTokenizer = trainBPE(corpus, vocabSize = 150)
+    var wpTokenizer = trainWordPiece(corpus, vocabSize = 150)
+    var spTokenizer = trainSentencePiece(corpus, vocabSize = 150)
+    var blbpeTokenizer = trainByteLevelBPE(corpus, vocabSize = 200)
     
     let testText = "княгиня Софья Васильевна была худая длинная женщина"
     
@@ -2863,17 +2893,17 @@ when isMainModule:
     echo "СРАВНЕНИЕ МЕТРИК:"
     echo "─" & "─".repeat(69)
     
-    let bpeMetrics = getMetrics(bpeTokenizer, testCorpus)
-    let wpMetrics = getMetrics(wpTokenizer, testCorpus)
-    let spMetrics = getMetrics(spTokenizer, testCorpus)
-    let blbpeMetrics = getMetrics(blbpeTokenizer, testCorpus)
+    let bpeMetrics = getMetrics(bpeTokenizer, corpus)
+    let wpMetrics = getMetrics(wpTokenizer, corpus)
+    let spMetrics = getMetrics(spTokenizer, corpus)
+    let blbpeMetrics = getMetrics(blbpeTokenizer, corpus)
     
     echo "                    │   BPE   │ WordPiece │ SentPiece │ ByteLvlBPE"
     echo "────────────────────┼─────────┼───────────┼───────────┼───────────"
-    echo "Размер словаря      │ ", bpeMetrics.vocabSize.align(7), " │ ",
-         wpMetrics.vocabSize.align(9), " │ ",
-         spMetrics.vocabSize.align(9), " │ ",
-         blbpeMetrics.vocabSize.align(10)
+    echo "Размер словаря      │ ", align($bpeMetrics.vocabSize, 7), " │ ",
+         align($wpMetrics.vocabSize, 9), " │ ",
+         align($spMetrics.vocabSize, 9), " │ ",
+         align($blbpeMetrics.vocabSize, 10)
     
     echo "Коэфф. сжатия       │ ", 
          bpeMetrics.compressionRatio.formatFloat(ffDecimal, 2).align(7), " │ ",
