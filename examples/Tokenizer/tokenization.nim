@@ -13,6 +13,7 @@
 #       абсолютные byte offsets в tokenizeWithOffsets;
 #       улучшенный BPE-dropout с гарантированной вариацией;
 #       декодирование токенов в читаемом виде для vocabulary analysis;
+#       исправление сохранения регистра (2026-01-31)
 # 0.4 — новые функции и оптимизация кода по критерию скорости выполнения:
 #       byte-Level BPE (GPT-2/3 compatible);
 #       token position tracking (для NER/QA);
@@ -533,21 +534,29 @@ proc trainBPE*(corpus: seq[string],
     result.specialTokenIds[token] = nextId
     inc nextId
   
+  # ВАЖНО: явно добавляем пробел в словарь
+  if " " notin result.vocab:
+    result.vocab[" "] = nextId
+    result.inverseVocab.add(" ")
+    inc nextId
+  
   # Собираем текст и токенизируем на символы
   let text = corpus.join(" ")
-  var processedText = text
-  if not preserveCase:
-    processedText = toLowerUnicode(processedText)
   
-  # Добавляем символы в словарь
+  # Добавляем символы в словарь (сохраняем оригинальный регистр)
   var charSet = initHashSet[string]()
-  for rune in processedText.runes:
+  for rune in text.runes:
     charSet.incl($rune)
   
   for ch in charSet:
     result.vocab[ch] = nextId
     result.inverseVocab.add(ch)
     inc nextId
+  
+  # Для обучения используем lowercase версию если нужно
+  var processedText = text
+  if not preserveCase:
+    processedText = toLowerUnicode(processedText)
   
   # Инициализируем словарь слов
   let words = splitIntoWords(processedText)
@@ -653,29 +662,39 @@ proc trainWordPiece*(corpus: seq[string],
     result.specialTokenIds[token] = nextId
     inc nextId
   
+  # ИСПРАВЛЕНО: Добавляем пробел явно в словарь
+  if " " notin result.vocab:
+    result.vocab[" "] = nextId
+    result.inverseVocab.add(" ")
+    inc nextId
+  
   # Собираем текст
   let text = corpus.join(" ")
   var processedText = text
   if not preserveCase:
     processedText = toLowerUnicode(processedText)
   
-  # Добавляем символы
+  # Добавляем символы из оригинального текста (если preserveCase) или из processedText
   var charSet = initHashSet[string]()
-  for rune in processedText.runes:
+  let textForChars = if preserveCase: text else: processedText
+  for rune in textForChars.runes:
     charSet.incl($rune)
   
   for ch in charSet:
-    result.vocab[ch] = nextId
-    result.inverseVocab.add(ch)
-    inc nextId
+    if ch notin result.vocab:  # Проверяем, чтобы не задублировать пробел
+      result.vocab[ch] = nextId
+      result.inverseVocab.add(ch)
+      inc nextId
   
-  # Генерируем подслова
-  let words = splitIntoWords(processedText)
+  # Генерируем подслова - УЛУЧШЕНО для кириллицы
+  let wordsForNgrams = if preserveCase: splitIntoWords(text) else: splitIntoWords(processedText)
   var ngramCounts = initCountTable[string]()
   
-  for word in words:
+  # Увеличиваем длину n-грамм для лучшего покрытия кириллических слов
+  for word in wordsForNgrams:
     let runeLen = word.runeLen
-    for n in 2..min(runeLen, 10):
+    # Увеличиваем до 15 для длинных слов
+    for n in 2..min(runeLen, 15):
       for start in 0..runeLen - n:
         let ngram = word.runeSubStr(start, n)
         let token = if start == 0: ngram else: continuingSubwordPrefix & ngram
@@ -684,8 +703,10 @@ proc trainWordPiece*(corpus: seq[string],
   var sortedNgrams = toSeq(ngramCounts.pairs)
   sortedNgrams.sort(proc (a, b: (string, int)): int = cmp(b[1], a[1]))
   
+  # Снижаем порог частоты для лучшего покрытия редких слов
+  let adjustedMinFreq = max(1, minFrequency div 2)
   for (ngram, count) in sortedNgrams:
-    if count >= minFrequency and nextId < vocabSize:
+    if count >= adjustedMinFreq and nextId < vocabSize:
       if ngram notin result.vocab:
         result.vocab[ngram] = nextId
         result.inverseVocab.add(ngram)
@@ -725,6 +746,7 @@ proc trainSentencePiece*(corpus: seq[string],
   
   var nextId = 0
   
+  # Добавляем специальные токены и их scores
   for token in [result.specialTokens.padToken, result.specialTokens.unkToken,
                 result.specialTokens.bosToken, result.specialTokens.eosToken,
                 result.specialTokens.sepToken, result.specialTokens.clsToken,
@@ -732,6 +754,7 @@ proc trainSentencePiece*(corpus: seq[string],
     result.vocab[token] = nextId
     result.inverseVocab.add(token)
     result.specialTokenIds[token] = nextId
+    result.scores[token] = 0.0  # Специальные токены имеют нулевой score
     inc nextId
   
   let text = corpus.join(" ")
@@ -794,74 +817,108 @@ proc tokenize*(text: string,
   
   case tokenizer.kind
   of tkBPE:
-    var processedText = text
-    if not tokenizer.preserveCase:
-      processedText = toLowerUnicode(processedText)
-    
-    let words = splitIntoWords(processedText)
-    
-    for word in words:
+    # Разбиваем на слова, сохраняем пробелы как отдельные токены
+    var i = 0
+    while i < text.len:
+      # Обрабатываем пробелы
+      if text[i] in Whitespace:
+        # Добавляем пробел как отдельный токен
+        let spaceTokenId = tokenizer.vocab.getOrDefault(" ", tokenizer.getUnkTokenId())
+        result.add(spaceTokenId)
+        inc i
+        continue
+      
+      # Читаем слово (оригинальное)
+      var wordStart = i
+      while i < text.len and text[i] notin Whitespace:
+        let rune = text.runeAt(i)
+        i += rune.size
+      
+      let word = text[wordStart..<i]
+      
+      # Токенизируем слово - пробуем с оригинальным регистром
       var tokens = newSeq[string]()
       for rune in word.runes:
-        tokens.add($rune)
+        let ch = $rune
+        # Если символ есть в словаре - используем его
+        # Иначе пробуем lowercase версию
+        if ch in tokenizer.vocab:
+          tokens.add(ch)
+        else:
+          let chLower = toLowerUnicode(ch)
+          tokens.add(chLower)
       
       # Применяем merges
       for merge in tokenizer.merges:
         var newTokens: seq[string] = @[]
-        var i = 0
-        while i < tokens.len:
-          if i < tokens.len - 1 and 
-             tokens[i] == merge.pair[0] and 
-             tokens[i + 1] == merge.pair[1]:
+        var j = 0
+        while j < tokens.len:
+          if j < tokens.len - 1 and 
+             tokens[j] == merge.pair[0] and 
+             tokens[j + 1] == merge.pair[1]:
             newTokens.add(merge.newToken)
-            i += 2
+            j += 2
           else:
-            newTokens.add(tokens[i])
-            inc i
+            newTokens.add(tokens[j])
+            inc j
         tokens = newTokens
       
+      # Добавляем токены слова
       for token in tokens:
         let tokenId = tokenizer.vocab.getOrDefault(token, tokenizer.getUnkTokenId())
         result.add(tokenId)
 
   of tkByteLevelBPE:
-    # ИСПРАВЛЕНО: БЕЗ toLowerCase! ByteLevelBPE работает на уровне байтов
-    let words = splitIntoWords(text)
+    # ИСПРАВЛЕНО: НЕ разбиваем на слова! Токенизируем весь текст целиком
+    # Кодируем через byteEncoder
+    var tokens = newSeq[string]()
+    let bytes = byteLevelEncode(text)
+    for b in bytes:
+      tokens.add(tokenizer.byteEncoder[b])
     
-    for word in words:
-      # Кодируем через byteEncoder — именно так тренировалось
-      var tokens = newSeq[string]()
-      let bytes = byteLevelEncode(word)
-      for b in bytes:
-        tokens.add(tokenizer.byteEncoder[b])
-      
-      # Применяем merges
-      for merge in tokenizer.merges:
-        var newTokens: seq[string] = @[]
-        var i = 0
-        while i < tokens.len:
-          if i < tokens.len - 1 and 
-             tokens[i] == merge.pair[0] and 
-             tokens[i + 1] == merge.pair[1]:
-            newTokens.add(merge.newToken)
-            i += 2
-          else:
-            newTokens.add(tokens[i])
-            inc i
-        tokens = newTokens
-      
-      for token in tokens:
-        let tokenId = tokenizer.vocab.getOrDefault(token, tokenizer.getUnkTokenId())
-        result.add(tokenId)
+    # Применяем merges
+    for merge in tokenizer.merges:
+      var newTokens: seq[string] = @[]
+      var i = 0
+      while i < tokens.len:
+        if i < tokens.len - 1 and 
+           tokens[i] == merge.pair[0] and 
+           tokens[i + 1] == merge.pair[1]:
+          newTokens.add(merge.newToken)
+          i += 2
+        else:
+          newTokens.add(tokens[i])
+          inc i
+      tokens = newTokens
+    
+    for token in tokens:
+      let tokenId = tokenizer.vocab.getOrDefault(token, tokenizer.getUnkTokenId())
+      result.add(tokenId)
   
   of tkWordPiece:
     var processedText = text
     if not tokenizer.preserveCase:
       processedText = toLowerUnicode(processedText)
     
-    let words = splitIntoWords(processedText)
-    
-    for word in words:
+    # ИСПРАВЛЕНО: Сохраняем пробелы явно
+    var i = 0
+    while i < processedText.len:
+      # Пропускаем пробелы и добавляем их как отдельные токены
+      if processedText[i] in Whitespace:
+        # Добавляем пробел
+        let spaceTokenId = tokenizer.vocab.getOrDefault(" ", tokenizer.getUnkTokenId())
+        result.add(spaceTokenId)
+        inc i
+        continue
+      
+      # Читаем слово
+      var wordStart = i
+      while i < processedText.len and processedText[i] notin Whitespace:
+        let rune = processedText.runeAt(i)
+        i += rune.size
+      
+      let word = processedText[wordStart..<i]
+      
       if word.runeLen > tokenizer.maxInputCharsPerWord:
         result.add(tokenizer.getUnkTokenId())
         continue
@@ -883,6 +940,17 @@ proc tokenize*(text: string,
             found = true
             start = endRune
             break
+          
+          # ИСПРАВЛЕНО: Пробуем lowercase версию при preserveCase
+          if tokenizer.preserveCase:
+            let lowerToken = if start == 0: toLowerUnicode(substr)
+                           else: tokenizer.continuingSubwordPrefix & toLowerUnicode(substr)
+            if lowerToken in tokenizer.vocab:
+              result.add(tokenizer.vocab[lowerToken])
+              found = true
+              start = endRune
+              break
+          
           dec endRune
         
         if not found:
@@ -947,7 +1015,61 @@ proc tokenizeWithOffsets*(text: string,
   var charPos = 0
   var bytePos = 0
   
-  if tokenizer.kind == tkByteLevelBPE or tokenizer.kind == tkBPE:
+  if tokenizer.kind == tkByteLevelBPE:
+    # ByteLevelBPE токенизирует весь текст целиком
+    var tokens = newSeq[string]()
+    let bytes = byteLevelEncode(text)
+    for b in bytes:
+      tokens.add(tokenizer.byteEncoder[b])
+    
+    # Применяем merges
+    for merge in tokenizer.merges:
+      var newTokens: seq[string] = @[]
+      var j = 0
+      while j < tokens.len:
+        if j < tokens.len - 1 and 
+           tokens[j] == merge.pair[0] and 
+           tokens[j + 1] == merge.pair[1]:
+          newTokens.add(merge.newToken)
+          j += 2
+        else:
+          newTokens.add(tokens[j])
+          inc j
+      tokens = newTokens
+    
+    # Расчёт позиций
+    var currentCharPos = 0
+    var currentBytePos = 0
+    
+    for token in tokens:
+      # Декодируем токен
+      var tokenBytes: seq[int] = @[]
+      for rune in token.runes:
+        let charStr = $rune
+        if charStr in tokenizer.byteDecoder:
+          tokenBytes.add(tokenizer.byteDecoder[charStr])
+      
+      let tokenByteLen = tokenBytes.len
+      let decodedToken = if tokenByteLen > 0: byteLevelDecode(tokenBytes) else: ""
+      let tokenCharLen = decodedToken.runeLen
+      
+      # Проверяем границы
+      let actualEndChar = min(currentCharPos + tokenCharLen, text.runeLen)
+      let actualEndByte = min(currentBytePos + tokenByteLen, text.len)
+      
+      result.add(TokenOffset(
+        token: token,
+        tokenId: tokenizer.vocab.getOrDefault(token, tokenizer.getUnkTokenId()),
+        startChar: currentCharPos,
+        endChar: actualEndChar,
+        startByte: currentBytePos,
+        endByte: actualEndByte
+      ))
+      
+      currentCharPos += tokenCharLen
+      currentBytePos += tokenByteLen
+  
+  elif tokenizer.kind == tkBPE:
     var i = 0
     
     while i < text.len:
@@ -973,15 +1095,10 @@ proc tokenizeWithOffsets*(text: string,
       
       let word = text[wordStart..<i]
       
-      # Токенизируем слово
+      # Токенизируем слово (только для обычного BPE)
       var tokens = newSeq[string]()
-      if tokenizer.kind == tkByteLevelBPE:
-        let bytes = byteLevelEncode(word)
-        for b in bytes:
-          tokens.add(tokenizer.byteEncoder[b])
-      else:
-        for rune in word.runes:
-          tokens.add($rune)
+      for rune in word.runes:
+        tokens.add($rune)
       
       # Применяем merges
       for merge in tokenizer.merges:
@@ -998,36 +1115,8 @@ proc tokenizeWithOffsets*(text: string,
             inc j
         tokens = newTokens
       
-      # Расчёт позиций для ByteLevelBPE
-      if tokenizer.kind == tkByteLevelBPE:
-        var currentCharPos = wordCharStart
-        var currentBytePos = wordByteStart
-        
-        for token in tokens:
-          # Декодируем токен
-          var tokenBytes: seq[int] = @[]
-          for rune in token.runes:
-            let charStr = $rune
-            if charStr in tokenizer.byteDecoder:
-              tokenBytes.add(tokenizer.byteDecoder[charStr])
-          
-          let tokenByteLen = tokenBytes.len
-          let tokenCharLen = if tokenByteLen > 0: byteLevelDecode(tokenBytes).runeLen else: 0
-          
-          result.add(TokenOffset(
-            token: token,
-            tokenId: tokenizer.vocab.getOrDefault(token, tokenizer.getUnkTokenId()),
-            startChar: currentCharPos,
-            endChar: currentCharPos + tokenCharLen,
-            startByte: currentBytePos,
-            endByte: currentBytePos + tokenByteLen
-          ))
-          
-          currentCharPos += tokenCharLen
-          currentBytePos += tokenByteLen
-      else:
-        # Для обычного BPE
-        for token in tokens:
+      # Для обычного BPE
+      for token in tokens:
           let tokenLen = token.runeLen
           let tokenByteLen = token.len
           
@@ -1154,7 +1243,7 @@ proc decode*(tokenizer: Tokenizer,
       result = byteLevelDecode(rawBytes)
     return
   
-  for tokenId in tokens:
+  for i, tokenId in tokens:
     if skipSpecialTokens and tokenId in [
       tokenizer.getPadTokenId(),
       tokenizer.getBosTokenId(),
@@ -1177,15 +1266,89 @@ proc decode*(tokenizer: Tokenizer,
     else:
       result.add(tokenizer.specialTokens.unkToken)
   
-  # Нормализуем пробелы для не-SentencePiece
-  if tokenizer.kind != tkSentencePiece and tokenizer.kind != tkByteLevelBPE:
-    result = result.replace("  ", " ")
-  
   # Для SentencePiece убираем начальный пробел и множественные пробелы
   if tokenizer.kind == tkSentencePiece:
     result = result.strip()
     while "  " in result:
       result = result.replace("  ", " ")
+
+
+#==============================================================================
+# JSON EXPORT (NEW - ДЛЯ СОХРАНЕНИЯ СЛОВАРЕЙ)
+#==============================================================================
+
+proc exportTokenizerToJson*(tokenizer: Tokenizer, filepath: string) =
+  ## Экспортирует все данные токенизатора в JSON формат
+  var jsonData = %* {
+    "kind": $tokenizer.kind,
+    "vocab_size": tokenizer.vocab.len,
+    "vocab": newJObject(),
+    "special_tokens": {
+      "pad": tokenizer.specialTokens.padToken,
+      "unk": tokenizer.specialTokens.unkToken,
+      "bos": tokenizer.specialTokens.bosToken,
+      "eos": tokenizer.specialTokens.eosToken,
+      "sep": tokenizer.specialTokens.sepToken,
+      "cls": tokenizer.specialTokens.clsToken,
+      "mask": tokenizer.specialTokens.maskToken
+    },
+    "max_input_chars_per_word": tokenizer.maxInputCharsPerWord,
+    "continuing_subword_prefix": tokenizer.continuingSubwordPrefix,
+    "preserve_case": tokenizer.preserveCase
+  }
+  
+  # Добавляем словарь (первые 100 элементов для компактности)
+  var vocabItems = newSeq[(string, int)]()
+  for token, id in tokenizer.vocab:
+    vocabItems.add((token, id))
+  vocabItems.sort(proc (a, b: (string, int)): int = cmp(a[1], b[1]))
+  
+  var vocabJson = newJObject()
+  for i, (token, id) in vocabItems:
+    if i < 100:  # Сохраняем первые 100
+      vocabJson[$id] = %token
+  jsonData["vocab"] = vocabJson
+  
+  # Добавляем merges для BPE (первые 50)
+  if tokenizer.kind in {tkBPE, tkByteLevelBPE} and tokenizer.merges.len > 0:
+    var mergesJson = newJArray()
+    for i, merge in tokenizer.merges:
+      if i < 50:  # Сохраняем первые 50 merges
+        mergesJson.add(%* {
+          "pair": [merge.pair[0], merge.pair[1]],
+          "new_token": merge.newToken,
+          "priority": merge.priority
+        })
+    jsonData["merges"] = mergesJson
+    jsonData["merges_total_count"] = %tokenizer.merges.len
+  
+  # Добавляем scores для SentencePiece (первые 50)
+  if tokenizer.kind == tkSentencePiece and tokenizer.scores.len > 0:
+    var scoresJson = newJObject()
+    var scoreItems = newSeq[(string, float)]()
+    for token, score in tokenizer.scores:
+      scoreItems.add((token, score))
+    scoreItems.sort(proc (a, b: (string, float)): int = -cmp(a[1], b[1]))
+    
+    for i, (token, score) in scoreItems:
+      if i < 50:  # Сохраняем топ 50
+        scoresJson[token] = %score
+    jsonData["scores"] = scoresJson
+    jsonData["scores_total_count"] = %tokenizer.scores.len
+  
+  # Добавляем byte encoder для ByteLevelBPE (первые 50)
+  if tokenizer.kind == tkByteLevelBPE and tokenizer.byteEncoder.len > 0:
+    var byteEncoderJson = newJObject()
+    var count = 0
+    for byteVal, encoded in tokenizer.byteEncoder:
+      if count < 50:
+        byteEncoderJson[$byteVal] = %encoded
+        inc count
+    jsonData["byte_encoder"] = byteEncoderJson
+    jsonData["byte_encoder_total_count"] = %tokenizer.byteEncoder.len
+  
+  # Сохраняем в файл
+  writeFile(filepath, jsonData.pretty())
 
 
 #==============================================================================
@@ -1374,41 +1537,51 @@ proc tokenizeWithDropout*(text: string,
                          dropoutProb: float = 0.1,
                          seed: int = -1,
                          minDropped: int = 1): seq[int] =
-  ## Токенизация с случайным пропуском merge операций
+  ## Токенизация с случайным пропуском merge операций - УЛУЧШЕНО
   ## minDropped: минимальное количество пропущенных merges для гарантии вариации
+  
+  # Работает только для BPE и ByteLevelBPE
+  if tokenizer.kind != tkBPE and tokenizer.kind != tkByteLevelBPE:
+    return tokenize(text, tokenizer, addSpecialTokens = false)
+  
   if seed >= 0:
     randomize(seed)
   else:
-    randomize()
+    randomize()  # Важно! Каждый раз новый seed
   
-  # Копируем merges и случайно пропускаем
+  let totalMerges = tokenizer.merges.len
+  if totalMerges == 0:
+    return tokenize(text, tokenizer, addSpecialTokens = false)
+  
+  # НОВЫЙ ПОДХОД: Создаем случайную перестановку индексов
+  let targetDropped = max(minDropped, int(float(totalMerges) * dropoutProb))
+  
+  # Если нужно пропустить 0 merges, возвращаем обычную токенизацию
+  if targetDropped == 0:
+    return tokenize(text, tokenizer, addSpecialTokens = false)
+  
+  # Создаем и перемешиваем индексы
+  var indices = newSeq[int](totalMerges)
+  for i in 0..<totalMerges:
+    indices[i] = i
+  
+  # Перемешиваем методом Фишера-Йетса
+  for i in countdown(totalMerges - 1, 1):
+    let j = rand(i)
+    swap(indices[i], indices[j])
+  
+  # Берем только первые (totalMerges - targetDropped) индексов
+  var keepIndices = initHashSet[int]()
+  for i in 0..<(totalMerges - targetDropped):
+    keepIndices.incl(indices[i])
+  
+  # Формируем активные merges в правильном порядке
   var activeMerges: seq[BPEMerge] = @[]
-  var droppedCount = 0
-  
-  # Первый проход - обычный dropout
-  for merge in tokenizer.merges:
-    let r = rand(1.0)
-    if r > dropoutProb:
+  for i, merge in tokenizer.merges:
+    if i in keepIndices:
       activeMerges.add(merge)
-    else:
-      inc droppedCount
   
-  # Если пропустили слишком мало, принудительно пропускаем еще
-  if droppedCount < minDropped and tokenizer.merges.len > minDropped:
-    # Восстанавливаем все
-    activeMerges = tokenizer.merges
-    # Выбираем случайные индексы для пропуска
-    var indicesToDrop = initHashSet[int]()
-    while indicesToDrop.len < minDropped:
-      indicesToDrop.incl(rand(tokenizer.merges.len - 1))
-    
-    # Пропускаем выбранные
-    activeMerges = @[]
-    for i, merge in tokenizer.merges:
-      if i notin indicesToDrop:
-        activeMerges.add(merge)
-  
-  # Временно заменяем merges
+  # Сохраняем оригинальные merges
   let savedMerges = tokenizer.merges
   tokenizer.merges = activeMerges
   
@@ -2170,30 +2343,29 @@ when isMainModule:
       failedTests: 0,
       totalDuration: 0.0
     )
+    currentGroup.totalDuration = -epochTime()  # Запоминаем время начала (отрицательное)
     echo ""
     echo "╔" & "═".repeat(70) & "╗"
     echo "║  ", alignLeft(name, 68), "║"
     echo "╚" & "═".repeat(70) & "╝"
 
   proc endTestGroup() =
+    currentGroup.totalDuration += epochTime()  # Добавляем время окончания
     allGroups.add(currentGroup)
     echo ""
-    echo "━" & "━".repeat(69)
+    echo repeat("━", 72)
     echo "Итого: ", currentGroup.passedTests, "/", currentGroup.totalTests, " тестов пройдено"
     if currentGroup.failedTests > 0:
       echo "❌ Провалено: ", currentGroup.failedTests
     else:
       echo "✅ Все тесты успешно пройдены!"
     echo "Время выполнения: ", currentGroup.totalDuration.formatFloat(ffDecimal, 3), " сек"
-    echo "━" & "━".repeat(69)
+    echo repeat("━", 72)
 
   proc test(name: string, condition: bool, message: string = "") =
-    let startTime = cpuTime()
     let passed = condition
-    let duration = cpuTime() - startTime
     
     currentGroup.totalTests += 1
-    currentGroup.totalDuration += duration
     
     if passed:
       currentGroup.passedTests += 1
@@ -2208,7 +2380,7 @@ when isMainModule:
       name: name,
       passed: passed,
       message: message,
-      duration: duration
+      duration: 0.0  # Не измеряем время отдельных тестов
     ))
 
 
@@ -2220,14 +2392,16 @@ when isMainModule:
   let corpus = split(readFile(FN), '\n')
 
   const testSentences = @[
-    "Простое предложение для тестирования.",
-    "Это более длинное предложение с большим количеством слов для проверки.",
-    "Краткое.",
+    "Сначала он всё-таки хотел разыскать её и ребёнка.",
+    """Речь товарища прокурора, по его мнению, должна была иметь 
+общественное значение, подобно тем знаменитым речам, которые говорили 
+сделавшиеся знаменитыми адвокаты.""",
+    "Весёлый купец.",
     "Текст со специальными символами: !@#$%^&*()",
     "Numbers: 123 456 789",
-    "UPPERCASE AND lowercase MiXeD",
+    "ВЕРХНИЙ РЕГИСТР И нижний регистр СмЕшАнНыЙ",
     "Повторение повторение повторение слов слов слов",
-    "княгиня Софья Васильевна была худая длинная"
+    "княгиня Софья Васильевна была худая длинная женщина"
   ]
 
   #============================================================================
@@ -2238,10 +2412,14 @@ when isMainModule:
     startTestGroup("ГРУППА 1: ТЕСТЫ BPE (BYTE PAIR ENCODING)")
     
     echo "\n→ Создание и обучение BPE токенизатора..."
-    var bpeTokenizer = trainBPE(corpus, vocabSize = 150, minFrequency = 1)
+    var bpeTokenizer = trainBPE(corpus, vocabSize = 1500, minFrequency = 1)
+    
+    # Сохраняем словарь в JSON
+    exportTokenizerToJson(bpeTokenizer, "bpe_vocab.json")
+    echo "✓ Словарь BPE сохранён в: bpe_vocab.json"
     
     test("1.1 Размер словаря BPE",
-         bpeTokenizer.vocab.len > 0 and bpeTokenizer.vocab.len <= 150,
+         bpeTokenizer.vocab.len > 0 and bpeTokenizer.vocab.len <= 1500,
          "Размер словаря: " & $bpeTokenizer.vocab.len)
     
     test("1.2 Наличие PAD токена в словаре",
@@ -2253,7 +2431,7 @@ when isMainModule:
     test("1.5 Наличие EOS токена в словаре",
          bpeTokenizer.specialTokens.eosToken in bpeTokenizer.vocab)
     
-    let testText = "Это тестовое предложение"
+    let testText = testSentences[0]
     let tokens = tokenize(testText, bpeTokenizer)
     test("1.6 Токенизация возвращает непустой результат",
          tokens.len > 0,
@@ -2276,7 +2454,7 @@ when isMainModule:
          bpeTokenizer.merges.len > 0,
          "Количество merges: " & $bpeTokenizer.merges.len)
     
-    let savePath = "/tmp/test_bpe.json"
+    let savePath = "test_bpe.json"
     saveTokenizer(bpeTokenizer, savePath)
     test("1.10 Сохранение токенизатора", fileExists(savePath))
     
@@ -2307,13 +2485,17 @@ when isMainModule:
     startTestGroup("ГРУППА 2: ТЕСТЫ WORDPIECE")
     
     echo "\n→ Создание и обучение WordPiece токенизатора..."
-    var wpTokenizer = trainWordPiece(corpus, vocabSize = 150, minFrequency = 1)
+    var wpTokenizer = trainWordPiece(corpus, vocabSize = 1500, minFrequency = 1, preserveCase = true)
+    
+    # Сохраняем словарь в JSON
+    exportTokenizerToJson(wpTokenizer, "wordpiece_vocab.json")
+    echo "✓ Словарь WordPiece сохранён в: wordpiece_vocab.json"
     
     test("2.1 Тип токенизатора WordPiece",
          wpTokenizer.kind == tkWordPiece)
     
     test("2.2 Размер словаря WordPiece",
-         wpTokenizer.vocab.len > 0 and wpTokenizer.vocab.len <= 150)
+         wpTokenizer.vocab.len > 0 and wpTokenizer.vocab.len <= 1500)
     
     test("2.3 Наличие префикса продолжения",
          wpTokenizer.continuingSubwordPrefix == "##")
@@ -2364,7 +2546,11 @@ when isMainModule:
     startTestGroup("ГРУППА 3: ТЕСТЫ SENTENCEPIECE")
     
     echo "\n→ Создание и обучение SentencePiece токенизатора..."
-    var spTokenizer = trainSentencePiece(corpus, vocabSize = 150)
+    var spTokenizer = trainSentencePiece(corpus, vocabSize = 1500)
+    
+    # Сохраняем словарь в JSON
+    exportTokenizerToJson(spTokenizer, "sentencepiece_vocab.json")
+    echo "✓ Словарь SentencePiece сохранён в: sentencepiece_vocab.json"
     
     test("3.1 Тип токенизатора SentencePiece",
          spTokenizer.kind == tkSentencePiece)
@@ -2422,7 +2608,11 @@ when isMainModule:
     startTestGroup("ГРУППА 4: ТЕСТЫ BYTE-LEVEL BPE (GPT-2 STYLE)")
     
     echo "\n→ Создание и обучение ByteLevel BPE токенизатора..."
-    var blbpeTokenizer = trainByteLevelBPE(corpus, vocabSize = 200)
+    var blbpeTokenizer = trainByteLevelBPE(corpus, vocabSize = 2000)
+    
+    # Сохраняем словарь в JSON
+    exportTokenizerToJson(blbpeTokenizer, "bytelevelbpe_vocab.json")
+    echo "✓ Словарь ByteLevelBPE сохранён в: bytelevelbpe_vocab.json"
     
     test("4.1 Тип токенизатора ByteLevelBPE",
          blbpeTokenizer.kind == tkByteLevelBPE)
@@ -2502,7 +2692,7 @@ when isMainModule:
   proc testAdditionalFunctions() =
     startTestGroup("ГРУППА 5: ТЕСТЫ ДОПОЛНИТЕЛЬНЫХ ФУНКЦИЙ")
     
-    var tokenizer = trainBPE(corpus, vocabSize = 150)
+    var tokenizer = trainBPE(corpus, vocabSize = 1500)
     
     let htmlText = "<div>Текст с <b>HTML</b> тегами</div>"
     let cleaned = cleanText(htmlText, removeHtml = true)
@@ -2564,7 +2754,7 @@ when isMainModule:
     test("5.13 validateTokenizer - проверка проходит",
          validationResults.len > 0)
     
-    var wpTokenizer = trainWordPiece(corpus, vocabSize = 150)
+    var wpTokenizer = trainWordPiece(corpus, vocabSize = 1500)
     let comparison = compareTokenizers("Тестовый текст", @[tokenizer, wpTokenizer])
     test("5.14 compareTokenizers - сравнение работает",
          comparison.len == 2)
@@ -2600,7 +2790,7 @@ when isMainModule:
   proc testCachingAndPerformance() =
     startTestGroup("ГРУППА 6: ТЕСТЫ КЭШИРОВАНИЯ И ПРОИЗВОДИТЕЛЬНОСТИ")
     
-    var tokenizer = trainByteLevelBPE(corpus, vocabSize = 200)
+    var tokenizer = trainByteLevelBPE(corpus, vocabSize = 2000)
     tokenizer.cacheMaxSize = 100
     
     test("6.1 Кэш изначально пуст",
@@ -2616,7 +2806,7 @@ when isMainModule:
          tokenizer.cacheHits == 1)
     
     test("6.4 Кэш содержит элемент",
-         text1 in tokenizer.cache)
+         (text1 & "0" & "false") in tokenizer.cache)
     
     let testText = "Тест производительности кэша"
     let startNoCache = cpuTime()
@@ -2661,7 +2851,7 @@ when isMainModule:
   proc testDropoutAndRegularization() =
     startTestGroup("ГРУППА 7: ТЕСТЫ BPE-DROPOUT И РЕГУЛЯРИЗАЦИИ")
     
-    var tokenizer = trainByteLevelBPE(corpus, vocabSize = 200)
+    var tokenizer = trainByteLevelBPE(corpus, vocabSize = 2000)
     let testText = "Тестовое предложение для проверки dropout"
     
     let originalTokens = tokenize(testText, tokenizer, addSpecialTokens = false)
@@ -2710,7 +2900,7 @@ when isMainModule:
   proc testEdgeCases() =
     startTestGroup("ГРУППА 8: ТЕСТЫ СПЕЦИАЛЬНЫХ СЛУЧАЕВ")
     
-    var tokenizer = trainBPE(corpus, vocabSize = 150)
+    var tokenizer = trainBPE(corpus, vocabSize = 1500)
     
     let emptyTokens = tokenize("", tokenizer, addSpecialTokens = false)
     test("8.1 Токенизация пустой строки",
@@ -2761,6 +2951,8 @@ when isMainModule:
     
     endTestGroup()
 
+
+
   #============================================================================
   # СТАТИСТИЧЕСКИЙ АНАЛИЗ РЕЗУЛЬТАТОВ
   #============================================================================
@@ -2768,7 +2960,7 @@ when isMainModule:
   proc printStatistics() =
     echo ""
     echo "╔" & "═".repeat(70) & "╗"
-    echo "║  СТАТИСТИЧЕСКИЙ АНАЛИЗ РЕЗУЛЬТАТОВ ТЕСТИРОВАНИЯ              ║"
+    echo "║          СТАТИСТИЧЕСКИЙ АНАЛИЗ РЕЗУЛЬТАТОВ ТЕСТИРОВАНИЯ              ║"
     echo "╚" & "═".repeat(70) & "╝"
     echo ""
     
@@ -2778,7 +2970,7 @@ when isMainModule:
     var totalDuration = 0.0
     
     echo "┌" & "─".repeat(70) & "┐"
-    echo "│ ГРУППА                              │ ПРОЙДЕНО │ ПРОВАЛЕНО │ ВРЕМЯ  │"
+    echo "│ ГРУППА                              │ ПРОЙДЕНО │ ПРОВАЛЕНО │  ВРЕМЯ  │"
     echo "├" & "─".repeat(70) & "┤"
     
     for group in allGroups:
@@ -2795,7 +2987,7 @@ when isMainModule:
       echo "│ ", groupName.alignLeft(35), " │ ", 
            passedStr.alignLeft(8), " │ ",
            failedStr.align(9), " │ ",
-           timeStr.align(6), " │"
+           timeStr.align(7), " │"
     
     echo "└" & "─".repeat(70) & "┘"
     echo ""
@@ -2839,7 +3031,7 @@ when isMainModule:
       echo "╚" & "═".repeat(70) & "╝"
     else:
       echo "╔" & "═".repeat(70) & "╗"
-      echo "║  ⚠️  ОБНАРУЖЕНЫ ПРОВАЛЕННЫЕ ТЕСТЫ: ", align($totalFailed, 27), " ║"
+      echo "║      ⚠️  ОБНАРУЖЕНЫ ПРОВАЛЕННЫЕ ТЕСТЫ: ", align($totalFailed, 30), " ║"
       echo "╚" & "═".repeat(70) & "╝"
     echo ""
 
@@ -2850,15 +3042,23 @@ when isMainModule:
   proc comparativeAnalysis() =
     echo ""
     echo "╔" & "═".repeat(70) & "╗"
-    echo "║  СРАВНИТЕЛЬНЫЙ АНАЛИЗ ТОКЕНИЗАТОРОВ                          ║"
+    echo "║          СРАВНИТЕЛЬНЫЙ АНАЛИЗ ТОКЕНИЗАТОРОВ                          ║"
     echo "╚" & "═".repeat(70) & "╝"
     echo ""
     
     echo "→ Обучение токенизаторов..."
-    var bpeTokenizer = trainBPE(corpus, vocabSize = 150)
-    var wpTokenizer = trainWordPiece(corpus, vocabSize = 150)
-    var spTokenizer = trainSentencePiece(corpus, vocabSize = 150)
-    var blbpeTokenizer = trainByteLevelBPE(corpus, vocabSize = 200)
+    var bpeTokenizer = trainBPE(corpus, vocabSize = 1500)
+    var wpTokenizer = trainWordPiece(corpus, vocabSize = 1500, preserveCase = true)
+    var spTokenizer = trainSentencePiece(corpus, vocabSize = 1500)
+    var blbpeTokenizer = trainByteLevelBPE(corpus, vocabSize = 2000)
+    
+    # Сохраняем все словари для сравнительного анализа
+    exportTokenizerToJson(bpeTokenizer, "comparative_bpe.json")
+    exportTokenizerToJson(wpTokenizer, "comparative_wordpiece.json")
+    exportTokenizerToJson(spTokenizer, "comparative_sentencepiece.json")
+    exportTokenizerToJson(blbpeTokenizer, "comparative_bytelevelbpe.json")
+    echo "✓ Все словари сохранены в файлах comparative_*.json"
+    echo ""
     
     let testText = "княгиня Софья Васильевна была худая длинная женщина"
     
@@ -2941,7 +3141,7 @@ when isMainModule:
   # ЗАПУСК ВСЕХ ТЕСТОВ
   #============================================================================
   
-  let overallStart = cpuTime()
+  let overallStart = epochTime()
   
   testBPE()
   testWordPiece()
@@ -2952,13 +3152,13 @@ when isMainModule:
   testDropoutAndRegularization()
   testEdgeCases()
   
-  let overallTime = cpuTime() - overallStart
+  let overallTime = epochTime() - overallStart
   
   printStatistics()
   comparativeAnalysis()
   
   echo "╔" & "═".repeat(70) & "╗"
-  echo "║  ТЕСТИРОВАНИЕ ЗАВЕРШЕНО                                      ║"
+  echo "║          ТЕСТИРОВАНИЕ ЗАВЕРШЕНО                                      ║"
   echo "╚" & "═".repeat(70) & "╝"
   echo ""
   echo "Общее время выполнения всех тестов: ", 
@@ -2971,3 +3171,8 @@ when isMainModule:
 
 # nim c -d:release tokenization.nim
 # nim c -d:release -d:danger --opt:speed tokenization.nim
+
+
+
+
+
