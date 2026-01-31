@@ -65,5 +65,5 @@ echo("Имя:", '\t', FN, '\t', A, '\n')
 
 
 
-# nim c -d:release NimLibrary.nim
+# nim c -d:release libGPT.nim
 
