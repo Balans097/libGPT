@@ -3,11 +3,19 @@
 ## 
 ##          Tokenization and text processing
 ## 
-## Версия:   0.6
+## Версия:   0.7
 ## Дата:     2026-02-01
 ## Автор:    github.com/Balans097
 ################################################################
 
+# 0.7 — расширенные функции (2026-02-01):
+#       продвинутая обработка текста (normalizeNumbers, handleContractions, etc);
+#       vocabulary management (merge, prune, expand, overlap analysis);
+#       продвинутые метрики (perplexity, segmentation quality, distribution);
+#       специализированные токенизаторы (code, math, markdown, JSON);
+#       интеграция и экспорт (HuggingFace, SentencePiece, TikToken);
+#       debugging и визуализация (visualize, debug, explain, conflicts);
+#       дополнительные утилиты (readable tokens, vocab coverage)
 # 0.6 — критические улучшения и новые функции (2026-02-01):
 #       исправление дублирования в byteLevelDecode;
 #       error handling и validation;
@@ -203,6 +211,97 @@ type
   VersionedTokenizer* = object
     tokenizer*: Tokenizer
     metadata*: TokenizerMetadata
+  
+  # НОВЫЕ ТИПЫ v0.7 - Продвинутая обработка текста
+  NumberNormalizationStrategy* = enum
+    nsKeepOriginal      ## Оставить числа как есть
+    nsReplaceWithToken  ## Заменить на [NUM]
+    nsReplaceWithDigits ## Заменить на разряды (123 -> [NUM_3DIGIT])
+    nsNormalize         ## Нормализовать (1,234.56 -> 1234.56)
+  
+  EmojiStrategy* = enum
+    esKeep      ## Сохранить эмодзи
+    esRemove    ## Удалить эмодзи
+    esReplace   ## Заменить на текстовое описание
+    esTokenize  ## Токенизировать отдельно
+  
+  # Vocabulary management
+  MergeStrategy* = enum
+    msUnion        ## Объединить все токены
+    msIntersection ## Только общие токены
+    msWeighted     ## Взвешенное объединение по частоте
+  
+  VocabOverlapStats* = object
+    commonTokens*: int
+    uniqueToFirst*: int
+    uniqueToSecond*: int
+    overlapRatio*: float
+    jaccardSimilarity*: float
+  
+  VocabFormat* = enum
+    vfJson          ## JSON формат
+    vfSentencePiece ## SentencePiece model
+    vfHuggingFace   ## HuggingFace tokenizer.json
+    vfPlainText     ## Простой текстовый формат
+    vfBinary        ## Бинарный формат
+  
+  # Метрики качества
+  QualityMetrics* = object
+    precision*: float
+    recall*: float
+    f1Score*: float
+    accuracy*: float
+    segmentationErrors*: int
+  
+  DistributionStats* = object
+    mean*: float
+    median*: float
+    stdDev*: float
+    min*: int
+    max*: int
+    quartiles*: array[3, float]  # Q1, Q2, Q3
+    histogram*: CountTable[int]
+  
+  ComparisonReport* = object
+    tokenizerNames*: seq[string]
+    vocabSizes*: seq[int]
+    compressionRatios*: seq[float]
+    avgTokenLengths*: seq[float]
+    unkRates*: seq[float]
+    speedComparison*: seq[float]  # tokens/sec
+    qualityScores*: seq[float]
+  
+  # Специализированные токенизаторы
+  ProgrammingLanguage* = enum
+    plPython
+    plJavaScript
+    plJava
+    plCpp
+    plRust
+    plGo
+    plNim
+  
+  # Debugging
+  TokenExplanation* = object
+    token*: string
+    tokenId*: int
+    frequency*: int
+    mergeHistory*: seq[string]  # История слияний BPE
+    exampleContexts*: seq[string]
+  
+  TokenConflict* = object
+    token1*: string
+    token2*: string
+    conflictType*: string  # "overlap", "ambiguous", "redundant"
+    suggestedResolution*: string
+  
+  DebugInfo* = object
+    originalText*: string
+    tokenIds*: seq[int]
+    tokens*: seq[string]
+    boundaries*: seq[tuple[start, endPos: int]]
+    unknownWords*: seq[string]
+    warnings*: seq[string]
 
 
 #==============================================================================
@@ -1468,7 +1567,7 @@ proc decodeBatch*(tokenizer: Tokenizer,
 
 
 #==============================================================================
-# VOCABULARY MANAGEMENT (NEW)
+# VOCABULARY MANAGEMENT
 #==============================================================================
 
 proc pruneVocabulary*(tokenizer: var Tokenizer,
@@ -2998,6 +3097,906 @@ proc runeCount*(s: string): int =
   for _ in s.runes:
     result.inc()
 
+
+#==============================================================================
+# ПРОДВИНУТАЯ ОБРАБОТКА ТЕКСТА (v0.7)
+#==============================================================================
+
+proc normalizeNumbers*(text: string, strategy: NumberNormalizationStrategy = nsKeepOriginal): string =
+  ## Нормализация чисел в тексте согласно выбранной стратегии
+  result = text
+  
+  case strategy
+  of nsKeepOriginal:
+    discard  # Ничего не делаем
+  
+  of nsReplaceWithToken:
+    # Заменяем все числа на [NUM]
+    result = result.replace(re"\d+([.,]\d+)?", "[NUM]")
+  
+  of nsReplaceWithDigits:
+    # Заменяем числа на токены с указанием количества разрядов
+    var processed = ""
+    var i = 0
+    while i < text.len:
+      if text[i].isDigit:
+        var numStr = ""
+        while i < text.len and (text[i].isDigit or text[i] in ['.', ',']):
+          numStr.add(text[i])
+          i.inc()
+        
+        let cleanNum = numStr.replace(".", "").replace(",", "")
+        let digitCount = cleanNum.len
+        processed.add("[NUM_" & $digitCount & "DIGIT]")
+      else:
+        processed.add(text[i])
+        i.inc()
+    result = processed
+  
+  of nsNormalize:
+    # Нормализуем формат чисел
+    var processed = ""
+    var i = 0
+    while i < text.len:
+      if text[i].isDigit:
+        var numStr = ""
+        while i < text.len and (text[i].isDigit or text[i] in ['.', ',', ' ']):
+          if text[i] != ' ' and text[i] != ',':
+            if text[i] == ',':
+              numStr.add('.')
+            else:
+              numStr.add(text[i])
+          i.inc()
+        processed.add(numStr)
+      else:
+        processed.add(text[i])
+        i.inc()
+    result = processed
+
+proc handleContractions*(text: string, expand: bool = true): string =
+  ## Обработка сокращений (contractions) в английском языке
+  if not expand:
+    return text
+  
+  const contractions = {
+    "n't": " not",
+    "'re": " are",
+    "'ve": " have",
+    "'ll": " will",
+    "'d": " would",
+    "'m": " am",
+    "can't": "cannot",
+    "won't": "will not",
+    "shan't": "shall not",
+    "let's": "let us",
+    "ain't": "is not"
+  }.toTable
+  
+  result = text
+  for contraction, expansion in contractions:
+    result = result.replace(contraction, expansion)
+
+proc normalizeUrls*(text: string, placeholder: string = "[URL]"): string =
+  ## Заменяет URL на placeholder токен
+  result = text
+  result = result.replace(reUrls, placeholder)
+  result = result.replace(reWwwUrls, placeholder)
+
+proc detectAndNormalizeEmails*(text: string, placeholder: string = "[EMAIL]"): string =
+  ## Детектирует и заменяет email адреса на placeholder
+  result = text.replace(reEmails, placeholder)
+
+proc handleEmojis*(text: string, strategy: EmojiStrategy = esKeep): string =
+  ## Обработка эмодзи согласно выбранной стратегии
+  case strategy
+  of esKeep:
+    return text
+  
+  of esRemove:
+    var cleaned = ""
+    for rune in text.runes:
+      let code = int(rune)
+      if not (code >= 0x1F600 and code <= 0x1F64F or
+              code >= 0x1F300 and code <= 0x1F5FF or
+              code >= 0x1F680 and code <= 0x1F6FF or
+              code >= 0x2600 and code <= 0x26FF or
+              code >= 0x2700 and code <= 0x27BF):
+        cleaned.add($rune)
+    return cleaned
+  
+  of esReplace:
+    const emojiMap = {
+      "😀": "[SMILE]",
+      "😂": "[LOL]",
+      "❤️": "[HEART]",
+      "👍": "[THUMBS_UP]",
+      "🎉": "[CELEBRATION]"
+    }.toTable
+    
+    result = text
+    for emoji, description in emojiMap:
+      result = result.replace(emoji, description)
+  
+  of esTokenize:
+    result = ""
+    for rune in text.runes:
+      let code = int(rune)
+      if code >= 0x1F600 and code <= 0x1F64F or
+         code >= 0x1F300 and code <= 0x1F5FF or
+         code >= 0x1F680 and code <= 0x1F6FF or
+         code >= 0x2600 and code <= 0x26FF or
+         code >= 0x2700 and code <= 0x27BF:
+        result.add(" " & $rune & " ")
+      else:
+        result.add($rune)
+
+proc segmentSentences*(text: string): seq[string] =
+  ## Сегментация текста на предложения
+  result = @[]
+  var currentSentence = ""
+  var i = 0
+  
+  while i < text.len:
+    currentSentence.add(text[i])
+    
+    if text[i] in ['.', '!', '?']:
+      if i + 1 < text.len and text[i + 1] == ' ':
+        if i + 2 < text.len and text[i + 2].isUpperAscii:
+          result.add(currentSentence.strip())
+          currentSentence = ""
+    
+    i.inc()
+  
+  if currentSentence.strip().len > 0:
+    result.add(currentSentence.strip())
+
+
+#==============================================================================
+# VOCABULARY MANAGEMENT (v0.7)
+#==============================================================================
+
+proc mergeVocabularies*(vocabs: seq[Tokenizer], strategy: MergeStrategy = msUnion): Tokenizer =
+  ## Объединяет словари нескольких токенизаторов
+  if vocabs.len == 0:
+    raise newException(ValidationError, "Пустой список токенизаторов")
+  
+  result = Tokenizer(
+    kind: vocabs[0].kind,
+    vocab: initTable[string, int](),
+    inverseVocab: @[],
+    specialTokens: vocabs[0].specialTokens,
+    specialTokenIds: initTable[string, int](),
+    merges: @[],
+    cache: initTable[string, seq[int]](),
+    cacheMaxSize: 10000
+  )
+  
+  case strategy
+  of msUnion:
+    var allTokens = initHashSet[string]()
+    for tokenizer in vocabs:
+      for token in tokenizer.vocab.keys:
+        allTokens.incl(token)
+    
+    for token in allTokens:
+      let id = result.vocab.len
+      result.vocab[token] = id
+      result.inverseVocab.add(token)
+  
+  of msIntersection:
+    if vocabs.len == 0:
+      return result
+    
+    var commonTokens = toHashSet(toSeq(vocabs[0].vocab.keys))
+    for i in 1..<vocabs.len:
+      let currentTokens = toHashSet(toSeq(vocabs[i].vocab.keys))
+      commonTokens = commonTokens * currentTokens
+    
+    for token in commonTokens:
+      let id = result.vocab.len
+      result.vocab[token] = id
+      result.inverseVocab.add(token)
+  
+  of msWeighted:
+    var tokenCounts = initCountTable[string]()
+    
+    for tokenizer in vocabs:
+      for token in tokenizer.vocab.keys:
+        tokenCounts.inc(token)
+    
+    var sortedTokens: seq[tuple[token: string, count: int]] = @[]
+    for token, count in tokenCounts:
+      sortedTokens.add((token, count))
+    
+    sortedTokens.sort(proc(a, b: tuple[token: string, count: int]): int =
+      cmp(b.count, a.count)
+    )
+    
+    for item in sortedTokens:
+      let id = result.vocab.len
+      result.vocab[item.token] = id
+      result.inverseVocab.add(item.token)
+
+
+
+proc expandVocabulary*(t: var Tokenizer, newTexts: seq[string], maxNewTokens: int) =
+  ## Расширяет словарь новыми токенами
+  var candidates = initCountTable[string]()
+  
+  for text in newTexts:
+    let words = splitIntoWords(text)
+    for word in words:
+      let tokens = tokenize(word, t, addSpecialTokens = false)
+      if tokens.len > 1:
+        candidates.inc(word)
+  
+  var sortedCandidates: seq[tuple[token: string, count: int]] = @[]
+  for token, count in candidates:
+    sortedCandidates.add((token, count))
+  
+  sortedCandidates.sort(proc(a, b: tuple[token: string, count: int]): int =
+    cmp(b.count, a.count)
+  )
+  
+  var added = 0
+  for item in sortedCandidates:
+    if added >= maxNewTokens:
+      break
+    
+    if item.token notin t.vocab:
+      let id = t.vocab.len
+      t.vocab[item.token] = id
+      t.inverseVocab.add(item.token)
+      added.inc()
+
+proc getVocabularyOverlap*(t1, t2: Tokenizer): VocabOverlapStats =
+  ## Анализирует перекрытие двух словарей
+  let vocab1 = toHashSet(toSeq(t1.vocab.keys))
+  let vocab2 = toHashSet(toSeq(t2.vocab.keys))
+  
+  let common = vocab1 * vocab2
+  let union = vocab1 + vocab2
+  
+  result.commonTokens = common.len
+  result.uniqueToFirst = (vocab1 - vocab2).len
+  result.uniqueToSecond = (vocab2 - vocab1).len
+  result.overlapRatio = if t1.vocab.len > 0: common.len.float / t1.vocab.len.float else: 0.0
+  result.jaccardSimilarity = if union.len > 0: common.len.float / union.len.float else: 0.0
+
+proc exportVocabulary*(t: Tokenizer, format: VocabFormat): string =
+  ## Экспортирует словарь в указанном формате
+  case format
+  of vfJson:
+    var jobj = %* {
+      "version": TOKENIZER_VERSION,
+      "type": $t.kind,
+      "vocab_size": t.vocab.len,
+      "vocab": newJObject()
+    }
+    
+    for token, id in t.vocab:
+      jobj["vocab"][token] = %id
+    
+    return $jobj
+  
+  of vfPlainText:
+    result = ""
+    for i in 0..<t.inverseVocab.len:
+      result.add(t.inverseVocab[i] & "\n")
+  
+  of vfHuggingFace:
+    var jobj = %* {
+      "version": "1.0",
+      "truncation": nil,
+      "padding": nil,
+      "added_tokens": [],
+      "normalizer": nil,
+      "pre_tokenizer": nil,
+      "post_processor": nil,
+      "decoder": nil,
+      "model": {
+        "type": "BPE",
+        "vocab": newJObject(),
+        "merges": []
+      }
+    }
+    
+    for token, id in t.vocab:
+      jobj["model"]["vocab"][token] = %id
+    
+    return $jobj
+  
+  of vfSentencePiece, vfBinary:
+    return "[NOT_IMPLEMENTED] Формат " & $format & " требует дополнительной реализации"
+
+proc importVocabulary*(format: VocabFormat, data: string): Tokenizer =
+  ## Импортирует словарь из указанного формата
+  result = Tokenizer(
+    kind: tkBPE,
+    vocab: initTable[string, int](),
+    inverseVocab: @[],
+    specialTokens: SpecialTokens(
+      padToken: "[PAD]",
+      unkToken: "[UNK]",
+      bosToken: "[BOS]",
+      eosToken: "[EOS]"
+    ),
+    specialTokenIds: initTable[string, int](),
+    merges: @[],
+    cache: initTable[string, seq[int]](),
+    cacheMaxSize: 10000
+  )
+  
+  case format
+  of vfJson:
+    let jobj = parseJson(data)
+    if jobj.hasKey("vocab"):
+      for token, idNode in jobj["vocab"]:
+        let id = idNode.getInt()
+        result.vocab[token] = id
+        
+        while result.inverseVocab.len <= id:
+          result.inverseVocab.add("")
+        result.inverseVocab[id] = token
+  
+  of vfPlainText:
+    var id = 0
+    for line in data.splitLines():
+      if line.len > 0:
+        result.vocab[line] = id
+        result.inverseVocab.add(line)
+        id.inc()
+  
+  of vfHuggingFace:
+    let jobj = parseJson(data)
+    if jobj.hasKey("model") and jobj["model"].hasKey("vocab"):
+      for token, idNode in jobj["model"]["vocab"]:
+        let id = idNode.getInt()
+        result.vocab[token] = id
+        
+        while result.inverseVocab.len <= id:
+          result.inverseVocab.add("")
+        result.inverseVocab[id] = token
+  
+  of vfSentencePiece, vfBinary:
+    raise newException(ValidationError, "Формат " & $format & " не поддерживается для импорта")
+
+
+#==============================================================================
+# ПРОДВИНУТЫЕ МЕТРИКИ (v0.7)
+#==============================================================================
+
+proc calculatePerplexity*(t: var Tokenizer, text: string, languageModel: Table[string, float] = initTable[string, float]()): float =
+  ## Вычисляет perplexity токенизации
+  let tokens = tokenize(text, t, addSpecialTokens = false)
+  if tokens.len == 0:
+    return 0.0
+  
+  var totalLogProb = 0.0
+  
+  if languageModel.len > 0:
+    for tokenId in tokens:
+      if tokenId < t.inverseVocab.len:
+        let token = t.inverseVocab[tokenId]
+        let prob = if token in languageModel: languageModel[token] else: 1e-10
+        totalLogProb += ln(prob)
+  else:
+    let uniformProb = 1.0 / t.vocab.len.float
+    totalLogProb = tokens.len.float * ln(uniformProb)
+  
+  result = exp(-totalLogProb / tokens.len.float)
+
+proc measureSegmentationQuality*(t: var Tokenizer, goldSegments: seq[seq[string]]): QualityMetrics =
+  ## Измеряет качество сегментации
+  var truePositives = 0
+  var falsePositives = 0
+  var falseNegatives = 0
+  var totalSegmentationErrors = 0
+  
+  for goldSegment in goldSegments:
+    let text = goldSegment.join("")
+    let predictedTokens = tokenize(text, t, addSpecialTokens = false)
+    
+    var predictedSegment: seq[string] = @[]
+    for tokenId in predictedTokens:
+      if tokenId < t.inverseVocab.len:
+        predictedSegment.add(t.inverseVocab[tokenId])
+    
+    let goldSet = toHashSet(goldSegment)
+    let predSet = toHashSet(predictedSegment)
+    
+    truePositives += (goldSet * predSet).len
+    falsePositives += (predSet - goldSet).len
+    falseNegatives += (goldSet - predSet).len
+    
+    if goldSegment != predictedSegment:
+      totalSegmentationErrors.inc()
+  
+  let precision = if (truePositives + falsePositives) > 0:
+                    truePositives.float / (truePositives + falsePositives).float
+                  else: 0.0
+  
+  let recall = if (truePositives + falseNegatives) > 0:
+                 truePositives.float / (truePositives + falseNegatives).float
+               else: 0.0
+  
+  let f1 = if (precision + recall) > 0:
+             2.0 * precision * recall / (precision + recall)
+           else: 0.0
+  
+  let accuracy = if goldSegments.len > 0:
+                   1.0 - (totalSegmentationErrors.float / goldSegments.len.float)
+                 else: 0.0
+  
+  result = QualityMetrics(
+    precision: precision,
+    recall: recall,
+    f1Score: f1,
+    accuracy: accuracy,
+    segmentationErrors: totalSegmentationErrors
+  )
+
+proc analyzeTokenDistribution*(t: var Tokenizer, corpus: seq[string]): DistributionStats =
+  ## Анализирует распределение длин токенов
+  var lengths: seq[int] = @[]
+  
+  for text in corpus:
+    let tokens = tokenize(text, t, addSpecialTokens = false)
+    for tokenId in tokens:
+      if tokenId < t.inverseVocab.len:
+        lengths.add(t.inverseVocab[tokenId].len)
+  
+  if lengths.len == 0:
+    return DistributionStats(
+      mean: 0.0, median: 0.0, stdDev: 0.0,
+      min: 0, max: 0,
+      quartiles: [0.0, 0.0, 0.0],
+      histogram: initCountTable[int]()
+    )
+  
+  lengths.sort()
+  
+  let mean = lengths.sum().float / lengths.len.float
+  let median = lengths[lengths.len div 2].float
+  
+  var variance = 0.0
+  for length in lengths:
+    variance += (length.float - mean) * (length.float - mean)
+  variance /= lengths.len.float
+  let stdDev = sqrt(variance)
+  
+  let q1 = lengths[lengths.len div 4].float
+  let q3 = lengths[lengths.len * 3 div 4].float
+  
+  var histogram = initCountTable[int]()
+  for length in lengths:
+    histogram.inc(length)
+  
+  result = DistributionStats(
+    mean: mean,
+    median: median,
+    stdDev: stdDev,
+    min: lengths[0],
+    max: lengths[^1],
+    quartiles: [q1, median, q3],
+    histogram: histogram
+  )
+
+proc compareTokenizers*(tokenizers: var seq[Tokenizer], tokenizerNames: seq[string], corpus: seq[string]): ComparisonReport =
+  ## Сравнивает несколько токенизаторов
+  result.tokenizerNames = tokenizerNames
+  result.vocabSizes = @[]
+  result.compressionRatios = @[]
+  result.avgTokenLengths = @[]
+  result.unkRates = @[]
+  result.speedComparison = @[]
+  result.qualityScores = @[]
+  
+  for i in 0 ..< tokenizers.len:
+    var t = tokenizers[i]
+    let metrics = getMetrics(t, corpus)
+    # если нужно сохранить изменения t обратно:
+    tokenizers[i] = t
+    result.compressionRatios.add(metrics.compressionRatio)
+    result.unkRates.add(metrics.unkTokenRate)
+    
+    let stats = getTokenStatistics(t, corpus)
+    result.avgTokenLengths.add(stats.avgLength)
+    
+    let startTime = epochTime()
+    for text in corpus[0..min(99, corpus.high)]:
+      discard tokenize(text, t)
+    let elapsed = epochTime() - startTime
+    let tokensPerSec = if elapsed > 0: stats.totalTokens.float / elapsed else: 0.0
+    result.speedComparison.add(tokensPerSec)
+    
+    let qualityScore = (1.0 - metrics.unkTokenRate) * 0.4 +
+                       (metrics.vocabUtilization) * 0.3 +
+                       (1.0 / (stats.avgLength + 1.0)) * 0.3
+    result.qualityScores.add(qualityScore)
+
+
+#==============================================================================
+# СПЕЦИАЛИЗИРОВАННЫЕ ТОКЕНИЗАТОРЫ (v0.7)
+#==============================================================================
+
+proc createCharacterTokenizer*(): Tokenizer =
+  ## Создаёт токенизатор уровня символов
+  result = Tokenizer(
+    kind: tkBPE,
+    vocab: initTable[string, int](),
+    inverseVocab: @[],
+    specialTokens: SpecialTokens(
+      padToken: "[PAD]",
+      unkToken: "[UNK]",
+      bosToken: "[BOS]",
+      eosToken: "[EOS]"
+    ),
+    specialTokenIds: initTable[string, int](),
+    merges: @[],
+    cache: initTable[string, seq[int]](),
+    cacheMaxSize: 10000
+  )
+  
+  result.vocab["[PAD]"] = 0
+  result.vocab["[UNK]"] = 1
+  result.vocab["[BOS]"] = 2
+  result.vocab["[EOS]"] = 3
+  result.inverseVocab.add("[PAD]")
+  result.inverseVocab.add("[UNK]")
+  result.inverseVocab.add("[BOS]")
+  result.inverseVocab.add("[EOS]")
+  
+  for code in 32..126:
+    let ch = $chr(code)
+    let id = result.vocab.len
+    result.vocab[ch] = id
+    result.inverseVocab.add(ch)
+
+proc createWhitespaceTokenizer*(): Tokenizer =
+  ## Создаёт простой токенизатор по пробелам
+  result = Tokenizer(
+    kind: tkBPE,
+    vocab: initTable[string, int](),
+    inverseVocab: @[],
+    specialTokens: SpecialTokens(
+      padToken: "[PAD]",
+      unkToken: "[UNK]",
+      bosToken: "[BOS]",
+      eosToken: "[EOS]"
+    ),
+    specialTokenIds: initTable[string, int](),
+    merges: @[],
+    cache: initTable[string, seq[int]](),
+    cacheMaxSize: 10000
+  )
+  
+  result.vocab["[PAD]"] = 0
+  result.vocab["[UNK]"] = 1
+  result.vocab["[BOS]"] = 2
+  result.vocab["[EOS]"] = 3
+  result.inverseVocab = @["[PAD]", "[UNK]", "[BOS]", "[EOS]"]
+
+proc createRegexTokenizer*(pattern: Regex): Tokenizer =
+  ## Создаёт токенизатор на основе регулярного выражения
+  result = createWhitespaceTokenizer()
+
+proc tokenizeCode*(t: var Tokenizer, code: string, language: ProgrammingLanguage): seq[int] =
+  ## Токенизация программного кода
+  var keywords: seq[string]
+  case language
+  of plPython:
+    keywords = @["def", "class", "if", "else", "elif", "for", "while", "return", "import", "from"]
+  of plJavaScript:
+    keywords = @["function", "const", "let", "var", "if", "else", "for", "while", "return"]
+  of plJava:
+    keywords = @["public", "private", "class", "if", "else", "for", "while", "return"]
+  of plCpp:
+    keywords = @["int", "float", "class", "struct", "if", "else", "for", "while"]
+  of plRust:
+    keywords = @["fn", "let", "mut", "if", "else", "for", "while", "return"]
+  of plGo:
+    keywords = @["func", "var", "if", "else", "for", "range", "return"]
+  of plNim:
+    keywords = @["proc", "var", "let", "if", "else", "for", "while", "return"]
+  
+  var processedCode = code
+  for op in ["(", ")", "{", "}", "[", "]", ";", ",", ":", "."]:
+    processedCode = processedCode.replace(op, " " & op & " ")
+  
+  result = tokenize(processedCode, t, addSpecialTokens = false)
+
+proc tokenizeMath*(t: var Tokenizer, mathExpr: string): seq[int] =
+  ## Токенизация математических выражений
+  var processed = mathExpr
+  
+  for op in ["+", "-", "*", "/", "^", "=", "(", ")", "[", "]"]:
+    processed = processed.replace(op, " " & op & " ")
+  
+  for fn in ["sin", "cos", "tan", "log", "ln", "exp", "sqrt"]:
+    processed = processed.replace(fn, " " & fn & " ")
+  
+  result = tokenize(processed, t, addSpecialTokens = false)
+
+proc tokenizeMarkdown*(t: var Tokenizer, md: string, preserveStructure: bool = true): seq[int] =
+  ## Токенизация Markdown
+  if not preserveStructure:
+    return tokenize(md, t)
+  
+  var processed = md
+  processed = processed.replace("# ", " [H1] ")
+  processed = processed.replace("## ", " [H2] ")
+  processed = processed.replace("### ", " [H3] ")
+  processed = processed.replace("**", " [BOLD] ")
+  processed = processed.replace("*", " [ITALIC] ")
+  processed = processed.replace("`", " [CODE] ")
+  
+  result = tokenize(processed, t, addSpecialTokens = false)
+
+proc tokenizeJson*(t: var Tokenizer, json: string): seq[int] =
+  ## Токенизация JSON
+  var processed = json
+  
+  for symbol in ["{", "}", "[", "]", ":", ","]:
+    processed = processed.replace(symbol, " " & symbol & " ")
+  
+  result = tokenize(processed, t, addSpecialTokens = false)
+
+
+#==============================================================================
+# ИНТЕГРАЦИЯ И ЭКСПОРТ (v0.7)
+#==============================================================================
+
+proc toHuggingFaceFormat*(t: Tokenizer): JsonNode =
+  ## Конвертирует токенизатор в формат HuggingFace
+  result = %* {
+    "version": "1.0",
+    "truncation": nil,
+    "padding": nil,
+    "added_tokens": [],
+    "normalizer": {"type": "Sequence", "normalizers": []},
+    "pre_tokenizer": {"type": "ByteLevel"},
+    "post_processor": {"type": "ByteLevel"},
+    "decoder": {"type": "ByteLevel"},
+    "model": {
+      "type": "BPE",
+      "dropout": nil,
+      "unk_token": t.specialTokens.unkToken,
+      "vocab": newJObject(),
+      "merges": newJArray()
+    }
+  }
+  
+  for token, id in t.vocab:
+    result["model"]["vocab"][token] = %id
+  
+  for merge in t.merges:
+    result["model"]["merges"].add(%(merge.pair[0] & " " & merge.pair[1]))
+
+proc toSentencePieceModel*(t: Tokenizer, path: string) =
+  ## Экспортирует в формат SentencePiece
+  var output = "# SentencePiece model\n"
+  output.add("# Vocabulary size: " & $t.vocab.len & "\n\n")
+  
+  for i in 0..<t.inverseVocab.len:
+    let token = t.inverseVocab[i]
+    let score = if token in t.scores: t.scores[token] else: 0.0
+    output.add(token & "\t" & score.formatFloat(ffDecimal, 6) & "\n")
+  
+  writeFile(path, output)
+
+proc toTikTokenFormat*(t: Tokenizer): string =
+  ## Экспортирует в формат TikToken
+  var entries: seq[string] = @[]
+  
+  for i in 0..<t.inverseVocab.len:
+    entries.add(t.inverseVocab[i] & " " & $i)
+  
+  result = entries.join("\n")
+
+proc fromPretrainedModel*(modelName: string): Tokenizer =
+  ## Загружает предобученный токенизатор
+  case modelName.toLowerAscii()
+  of "gpt2", "gpt-2":
+    result = Tokenizer(
+      kind: tkByteLevelBPE,
+      vocab: initTable[string, int](),
+      inverseVocab: @[],
+      specialTokens: SpecialTokens(
+        padToken: "<|endoftext|>",
+        unkToken: "<|endoftext|>",
+        bosToken: "<|endoftext|>",
+        eosToken: "<|endoftext|>"
+      ),
+      specialTokenIds: initTable[string, int](),
+      merges: @[],
+      byteEncoder: initBytePairEncoder(),
+      cache: initTable[string, seq[int]](),
+      cacheMaxSize: 10000
+    )
+    result.byteDecoder = initByteDecoder(result.byteEncoder)
+  
+  of "bert", "bert-base":
+    result = Tokenizer(
+      kind: tkWordPiece,
+      vocab: initTable[string, int](),
+      inverseVocab: @[],
+      specialTokens: SpecialTokens(
+        padToken: "[PAD]",
+        unkToken: "[UNK]",
+        bosToken: "[CLS]",
+        eosToken: "[SEP]",
+        clsToken: "[CLS]",
+        sepToken: "[SEP]",
+        maskToken: "[MASK]"
+      ),
+      specialTokenIds: initTable[string, int](),
+      continuingSubwordPrefix: "##",
+      cache: initTable[string, seq[int]](),
+      cacheMaxSize: 10000
+    )
+  
+  else:
+    raise newException(ValidationError, "Неизвестная модель: " & modelName)
+
+
+#==============================================================================
+# DEBUGGING И ВИЗУАЛИЗАЦИЯ (v0.7)
+#==============================================================================
+
+proc visualizeTokenization*(t: var Tokenizer, text: string): string =
+  ## Визуализирует токенизацию с цветовым кодированием
+  let tokens = tokenizeWithOffsets(text, t)
+  
+  const colors = [
+    "\e[31m", "\e[32m", "\e[33m", "\e[34m", "\e[35m", "\e[36m"
+  ]
+  const reset = "\e[0m"
+  
+  result = ""
+  var lastEnd = 0
+  
+  for i, token in tokens:
+    if token.startChar > lastEnd and lastEnd < text.len:
+      result.add(text[lastEnd..<token.startChar])
+    
+    let colorIdx = i mod colors.len
+    result.add(colors[colorIdx] & token.token & reset)
+    lastEnd = token.endChar
+  
+  if lastEnd < text.len:
+    result.add(text[lastEnd..^1])
+  
+  result.add("\n\nТокены:\n")
+  for i, token in tokens:
+    result.add("  [" & $i & "] " & token.token & " (id: " & $token.tokenId & ")\n")
+
+proc debugTokenization*(t: var Tokenizer, text: string): DebugInfo =
+  ## Детальная отладочная информация
+  result.originalText = text
+  
+  let tokenOffsets = tokenizeWithOffsets(text, t)
+  result.tokenIds = @[]
+  result.tokens = @[]
+  result.boundaries = @[]
+  result.unknownWords = @[]
+  result.warnings = @[]
+  
+  let unkId = getUnkTokenId(t)
+  
+  for token in tokenOffsets:
+    result.tokenIds.add(token.tokenId)
+    result.tokens.add(token.token)
+    result.boundaries.add((token.startChar, token.endChar))
+    
+    if token.tokenId == unkId:
+      result.unknownWords.add(token.token)
+      result.warnings.add("Неизвестное слово: '" & token.token & "' в позиции " & $token.startChar)
+  
+  if result.unknownWords.len > result.tokens.len div 2:
+    result.warnings.add("ВНИМАНИЕ: Более 50% токенов неизвестны!")
+
+proc explainToken*(t: Tokenizer, tokenId: int): TokenExplanation =
+  ## Объясняет происхождение токена
+  if tokenId < 0 or tokenId >= t.inverseVocab.len:
+    return TokenExplanation(
+      token: "[INVALID]",
+      tokenId: tokenId,
+      frequency: 0,
+      mergeHistory: @[],
+      exampleContexts: @[]
+    )
+  
+  result.token = t.inverseVocab[tokenId]
+  result.tokenId = tokenId
+  result.frequency = 0
+  result.mergeHistory = @[]
+  
+  if t.kind == tkBPE or t.kind == tkByteLevelBPE:
+    let token = result.token
+    if token.len > 1:
+      for i in 1..<token.len:
+        let left = token[0..<i]
+        let right = token[i..^1]
+        if left in t.vocab and right in t.vocab:
+          result.mergeHistory.add(left & " + " & right)
+  
+  result.exampleContexts = @["[требуется корпус для примеров]"]
+
+proc findTokenConflicts*(t: Tokenizer): seq[TokenConflict] =
+  ## Находит конфликты в словаре
+  result = @[]
+  
+  for i in 0..<t.inverseVocab.len:
+    let token1 = t.inverseVocab[i]
+    
+    for j in (i+1)..<t.inverseVocab.len:
+      let token2 = t.inverseVocab[j]
+      
+      if token1.startsWith(token2) or token2.startsWith(token1):
+        result.add(TokenConflict(
+          token1: token1,
+          token2: token2,
+          conflictType: "overlap",
+          suggestedResolution: "Рассмотреть удаление более короткого токена"
+        ))
+      
+      if token1.len == token2.len and token1.len > 2:
+        var differences = 0
+        for k in 0..<token1.len:
+          if token1[k] != token2[k]:
+            differences.inc()
+        
+        if differences == 1:
+          result.add(TokenConflict(
+            token1: token1,
+            token2: token2,
+            conflictType: "ambiguous",
+            suggestedResolution: "Проверить, не ошибка ли это в словаре"
+          ))
+  
+  if result.len > 100:
+    result = result[0..<100]
+
+proc getReadableTokens*(t: Tokenizer, tokenIds: seq[int]): seq[string] =
+  ## Конвертирует ID токенов в читаемые строки
+  result = @[]
+  for id in tokenIds:
+    if id < t.inverseVocab.len:
+      result.add(t.inverseVocab[id])
+    else:
+      result.add("[INVALID_ID:" & $id & "]")
+
+proc analyzeVocabCoverage*(t: var Tokenizer, texts: seq[string]): tuple[coverage: float, uniqueTokens: int, totalWords: int] =
+  ## Анализирует покрытие словаря
+  var uniqueWords = initHashSet[string]()
+  var totalWords = 0
+  var coveredWords = 0
+  
+  for text in texts:
+    let words = splitIntoWords(text)
+    totalWords += words.len
+    
+    for word in words:
+      uniqueWords.incl(word.toLowerAscii())
+      
+      let tokens = tokenize(word, t, addSpecialTokens = false)
+      var hasUnk = false
+      let unkId = getUnkTokenId(t)
+      
+      for tokenId in tokens:
+        if tokenId == unkId:
+          hasUnk = true
+          break
+      
+      if not hasUnk:
+        coveredWords.inc()
+  
+  let coverage = if totalWords > 0: coveredWords.float / totalWords.float else: 0.0
+  
+  result = (coverage: coverage, uniqueTokens: uniqueWords.len, totalWords: totalWords)
+
+
 proc truncateToRunes*(s: string, maxRunes: int): string =
   ## Обрезает строку до заданного количества рун (Unicode символов)
   result = ""
@@ -3101,7 +4100,7 @@ when isMainModule:
   #============================================================================
   # ТЕСТОВЫЕ ДАННЫЕ
   #============================================================================
-  const FN = "../Тексты и книги/Базовый текст.txt"
+  const FN = "../examples/Тексты и книги/Базовый текст.txt"
   let corpus = split(readFile(FN), '\n')
 
   const testSentences = @[
