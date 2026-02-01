@@ -3,7 +3,7 @@ libGPT is a well-structured Nim library that implements a full cycle of working 
 
 libGPT — это вычислительно эффективная хорошо структурированная библиотека на Nim, реализующая полный цикл работы с GPT-подобными моделями.
 
-**Work in progress! Not for using.**
+**Not for using! Work in progress.**
 
 
 ## Основные характеристики библиотеки
