@@ -1,0 +1,180 @@
+1. Инициализация и обучение токенизаторов
+
+trainBPE
+trainWordPiece
+trainSentencePiece
+trainByteLevelBPE
+createCharacterTokenizer
+createWhitespaceTokenizer
+createRegexTokenizer
+fromPretrainedModel
+initSpecialTokens
+addSpecialTokensToVocab
+
+2. Токенизация и кодирование
+
+tokenize
+tokenizeWithOffsets
+streamTokenize (итератор)
+tokenizeWithDropout
+tokenizeThreadSafe
+tokenizeCode
+tokenizeMath
+tokenizeMarkdown
+tokenizeJson
+encodeBPE
+encodeWordPiece
+encodeSentencePiece
+viterbiEncode
+encodeWithPadding
+maskTokens
+byteLevelEncode
+
+3. Декодирование
+
+decode
+decodeBatch
+decodeThreadSafe
+decodeToken
+byteLevelDecode
+reverseBPE
+
+4. Предобработка и очистка текста
+
+cleanText
+normalizeText
+normalizeNFKC
+handleZeroWidthChars
+normalizeWhitespace
+normalizeWhitespaceAdvanced
+fullNormalization
+normalizeNumbers
+handleContractions
+normalizeUrls
+detectAndNormalizeEmails
+handleEmojis
+removeAccents
+toLowerUnicode
+toUpperUnicode
+toLowerUnicodeOptimized
+toUpperUnicodeOptimized
+handleScriptMixing
+segmentSentences
+splitIntoSentences
+splitIntoWords
+truncateText
+truncateToRunes
+
+5. Управление словарем (Vocabulary Management)
+
+pruneVocabulary
+incrementalTrain
+updateVocabulary
+addTokens
+removeRareTokens
+mergeVocabularies
+expandVocabulary
+compressVocabulary
+pruneByFrequency
+alignVocabularies
+mergeTokenizers
+findCommonTokens
+getVocabularyOverlap
+exportVocabulary
+importVocabulary
+getVocabSize
+getVocabTokens
+getTokenById
+getIdByToken
+hasToken
+filterTokensByFrequency
+analyzeOOVWords
+
+6. Метрики, анализ и статистика
+
+getMetrics
+printMetrics
+analyzeVocabulary
+calculateCompressionRatio
+calculateAvgTokensPerWord
+calculateVocabUtilization
+calculateUnkTokenRate
+benchmark
+getSubwordFrequencies
+getTokenStatistics
+getTokenBoundaries
+analyzeVocabCoverage
+calculatePerplexity
+measureSegmentationQuality
+analyzeTokenDistribution
+compareTokenizers (несколько перегрузок)
+getSubwordBreakdown
+estimateTokenCount
+countWords
+countCharacters
+countSentences
+runeCount
+
+7. Сохранение, загрузка и экспорт
+
+saveTokenizer
+loadTokenizer
+exportTokenizerToJson
+saveVersionedTokenizer
+loadVersionedTokenizer
+createMetadata
+toHuggingFaceFormat
+toSentencePieceModel
+toTikTokenFormat
+
+8. Пакетная обработка и последовательности
+
+encodeBatch
+decodeBatch
+padSequence
+truncateSequence
+createAttentionMask (две перегрузки)
+
+9. Кэширование и оптимизация
+
+initCache
+clearCache
+newLRUCache
+evictLRU
+get (LRU Cache)
+put
+clear (LRU)
+getStats
+
+10. Потокобезопасность
+
+newThreadSafeTokenizer
+tokenizeThreadSafe
+decodeThreadSafe
+destroyThreadSafeTokenizer
+
+11. Отладка, визуализация и объяснения
+
+visualizeTokenization
+debugTokenization
+explainToken
+findTokenConflicts
+getReadableTokens
+validateTokenizerDetailed
+validateInput
+validateTokenizer
+
+12. Специализированные и вспомогательные функции
+
+initBytePairEncoder
+initByteDecoder
+countPairs
+mergePair
+detectLanguage
+getBPESegmentations
+analyzeVocabCoverage (дополнительная)
+truncateToRunes
+
+Общее количество функций: ≈ 130+ (включая перегрузки и вспомогательные).
+
+Библиотека охватывает полный цикл работы с токенизацией: от обучения и предобработки до анализа, отладки, интеграции с Hugging Face/SentencePiece/TikToken и продвинутых функций (BPE-dropout, multilingual, LRU cache, thread-safety, vocabulary alignment и т.д.).
