@@ -1,26 +1,4 @@
-################################################################
-##                ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-## 
-##                  Auxiliary functions
-## 
-## Версия:   0.2
-## Дата:     2026-06-23
-## Автор:    github.com/Balans097
-################################################################
-
-# 0.2 — добавлены функции определения кодировки файлов (2026-02-02)
-# 0.1 — начальная реализация библиотеки (2026-01-30)
-
-
-
-
-# nim c -d:release utils.nim
-
-
-
-
 import std/[tables, strutils, unicode]
-
 
 
 
@@ -858,15 +836,3 @@ proc convertFile*(inputFile: string, outputFile: string = ""): bool =
   except:
     echo "Ошибка при конвертации файла: ", getCurrentExceptionMsg()
     return false
-
-
-
-
-
-
-
-
-
-
-# nim c -d:release utils.nim
-
