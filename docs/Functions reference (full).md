@@ -2260,9 +2260,9 @@ proc validateInput(input: string, maxChars: int = 280): bool =
 
 ---
 
-## Завершение справочника
+## Резюме
 
-Это полный справочник по API библиотеки tokenization.nim версии 0.7.
+Документ представляет полный справочник по API библиотеки tokenization версии 0.7, разработанной на языке программирования Nim.
 
 ### Дополнительные ресурсы
 
@@ -2280,7 +2280,7 @@ proc validateInput(input: string, maxChars: int = 280): bool =
 ✅ Экспорт и совместимость (HuggingFace, SentencePiece, TikToken)
 ✅ Отладка и визуализация
 ✅ Потокобезопасность и кэширование
-✅ Оптимизация производительности (20-50x улучшения)
+✅ Оптимизация производительности (20-50x скорость в сравнении с реализациями на Python)
 
 ### Быстрый старт
 
@@ -2305,6 +2305,5 @@ saveTokenizer(tok, "my_tokenizer.bin")
 var loadedTok = loadTokenizer("my_tokenizer.bin")
 ```
 
----
 
-**Конец справочника**
+
