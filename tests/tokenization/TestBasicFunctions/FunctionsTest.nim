@@ -13,8 +13,11 @@
 
 # nim c -d:release FunctionsTest.nim
 
-import std/[encodings]
+
+
+# import std/[encodings]
 import strutils
+# import libGPT
 import tokenization, utils
 
 
@@ -25,13 +28,16 @@ import tokenization, utils
 ###############  И С Х О Д Н Ы Е   Д А Н Н Ы Е  ################
 ################################################################
 const
-  # FN = "BadTextExampleUTF8.txt"
-  # FN = "BadTextExampleUTF8BOM.txt"
-  FN = "BadTextExampleKOI8-R.txt"
-  # FN = "BadTextExampleANSI.txt"
+  P2T = "Texts"
+  FN = P2T & "/BadTextExampleKOI8-R.txt"
+  # FN = "Texts/Воскресение (1899).fb2"
+  # FN = "Texts/BadTextExampleUTF8.txt"
+  # FN = "Texts/BadTextExampleANSI.txt"
+
 
 let
-  text = readFile(FN)
+  # Читаем заданное количество строк
+  text = join(readFirstLines(FN, 2520), "\n")
 
 
 
@@ -43,11 +49,14 @@ let
 
 let CP = analyzeFile(FN)
 echo "Кодировка:\t", CP
-echo "Кодировка:\t", charDetDetailed(text)
+echo "Кодировка:\t", charDetDetailed(text), '\n'
 
 echo "ОЧИСТКА ТЕКСТА"
-echo repeat("=", 70)
-echo cleanText(toUTF8(text, CP))
+let CleanedText = cleanText(toUTF8(text, CP))
+echo repeat("=", 64)
+echo CleanedText
+writeFile(P2T & "/CleanedText.txt", CleanedText)
+
 
 
 #[ let TT = convert(text, "UTF-8", "koi8-r")

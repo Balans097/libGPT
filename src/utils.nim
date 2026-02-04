@@ -19,10 +19,15 @@
 
 
 
-import std/[tables, strutils, unicode]
+import std/[paths, files, tables, strutils, unicode]
 
 
 
+
+const
+  # Количество строк по умолчанию,
+  # которые читает функция readFirstLines
+  DefNumLines = 2520
 
 
 type
@@ -43,7 +48,6 @@ type
     encoding: Encoding
     score: float
     confidence: float
-
 
 
 
@@ -800,16 +804,6 @@ proc charDetDetailed*(text: string): tuple[encoding: Encoding, confidence: float
 
 
 
-# Функция для анализа файла
-proc analyzeFile*(filename: string): Encoding =
-  try:
-    let content = readFile(filename)
-    return charDet(content)
-  except:
-    echo "Ошибка при чтении файла: ", getCurrentExceptionMsg()
-    return UNKNOWN
-
-
 
 # Публичные функции конвертации текста в UTF-8
 proc toUTF8*(text: string, encoding: Encoding): string =
@@ -839,6 +833,45 @@ proc toUTF8*(text: string, encoding: Encoding): string =
 
 
 
+proc readFirstLines*(FN: string; numLines: int = DefNumLines): seq[string] =
+  ## Прочитать первые numLines строк из файла с именем FN.
+  ## Если количество строк в файле меньше заданного,
+  ## то вернуть столько, сколько есть.
+  if not fileExists(Path(FN)): return @[]
+
+  var f: File = nil
+  if open(f, FN):
+    try:
+      result = newSeqOfCap[string](numLines)
+      var count = 0
+      for line in lines(f):
+        add(result, line)
+        inc count
+        if count >= numLines: break
+    finally:
+      close(f)
+  else:
+    # raise newException(IOError, "Cannot open: " & FN)
+    return @[]   # или raise
+
+
+
+
+# Функция анализа кодировки файла
+proc analyzeFile*(FN: string): Encoding =
+  try:
+    # Чтение заданного количества первых строк файла
+    let content = join(readFirstLines(FN), "\n")
+    # Чтение всего файла
+    # let content = readFile(filename)
+    return charDet(content)
+  except:
+    echo "Ошибка при чтении файла: ", getCurrentExceptionMsg()
+    return UNKNOWN
+
+
+
+
 proc convertFile*(inputFile: string, outputFile: string = ""): bool =
   ## Автоматически определяет кодировку входного файла и конвертирует в UTF-8
   ## Если outputFile не указан, перезаписывает исходный файл
@@ -858,6 +891,12 @@ proc convertFile*(inputFile: string, outputFile: string = ""): bool =
   except:
     echo "Ошибка при конвертации файла: ", getCurrentExceptionMsg()
     return false
+
+
+
+
+
+
 
 
 

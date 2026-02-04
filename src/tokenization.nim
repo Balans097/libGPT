@@ -70,9 +70,9 @@
 # nim c -d:release -d:danger --opt:speed tokenization.nim
 
 
-
+# import os
 import math, times, random, streams
-import std/[tables, sequtils, strutils, algorithm, sets, unicode, json, os, re, locks, options, hashes]
+import std/[tables, sequtils, strutils, algorithm, sets, unicode, json, re, locks, options, hashes]
 
 
 
@@ -358,7 +358,7 @@ proc cleanText*(text: string,
                 removeUrls: bool = true,
                 removeEmails: bool = true,
                 removeExtraWhitespace: bool = true,
-                removeEmoji: bool = false,
+                removeEmoji: bool = true,
                 removeNumbers: bool = false,
                 removePunctuation: bool = false,
                 normalizeQuotes: bool = true,
@@ -366,30 +366,30 @@ proc cleanText*(text: string,
                 removeControlChars: bool = true): string =
   ## Универсальная очистка текста; использует прекомпилированные regex
   result = text
-  
+
   # Удаляем HTML теги
   if removeHtml:
-    result = replace(result, reHtmlTags, "")
+    result = replace(result, reHtmlTags, " ")
     result = replace(result, reHtmlEntities, " ")
-  
+
   # Удаляем URLs
   if removeUrls:
     result = replace(result, reUrls, "")
     result = replace(result, reWwwUrls, "")
-  
+
   # Удаляем email адреса
   if removeEmails:
     result = replace(result, reEmails, "")
-  
+
   # Удаляем управляющие символы (кроме \n, \t)
   if removeControlChars:
     var cleaned = ""
     for rune in runes(result):
       let code = int(rune)
-      if code >= 32 or code == 9 or code == 10:
+      if code == 9 or code == 10 or code >= 32:
         add(cleaned, $rune)
     result = cleaned
-  
+
   # Нормализуем кавычки
   if normalizeQuotes:
     var cleaned = ""
@@ -405,18 +405,20 @@ proc cleanText*(text: string,
       else:
         add(cleaned, $rune)
     result = cleaned
-  
+
   # Нормализуем тире
   if normalizeDashes:
     var cleaned = ""
     for rune in runes(result):
       let code = int(rune)
       if code in [0x2013, 0x2014, 0x2015]:  # – — ―
+        # Следует различать дефис и тире, но эту обработку
+        # имеет смысл проводить отдельно; пока ставим дефис
         add(cleaned, "-")
       else:
         add(cleaned, $rune)
     result = cleaned
-  
+
   # Удаляем эмодзи (диапазоны Unicode)
   if removeEmoji:
     var cleaned = ""
@@ -429,11 +431,11 @@ proc cleanText*(text: string,
               code >= 0x2700 and code <= 0x27BF):     # Dingbats
         add(cleaned, $rune)
     result = cleaned
-  
+
   # Удаляем цифры
   if removeNumbers:
     result = replace(result, reNumbers, "")
-  
+
   # Удаляем пунктуацию
   if removePunctuation:
     var cleaned = ""
@@ -441,12 +443,14 @@ proc cleanText*(text: string,
       if not ($rune in "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"):
         add(cleaned, $rune)
     result = cleaned
-  
+
   # Удаляем лишние пробелы
   if removeExtraWhitespace:
     result = replace(result, reMultipleNewlines, "\n\n")
     result = replace(result, reMultipleSpaces, " ")
     result = strip(result)
+
+
 
 proc normalizeText*(text: string): string =
   result = cleanText(text,
@@ -457,6 +461,8 @@ proc normalizeText*(text: string): string =
     normalizeQuotes = true,
     normalizeDashes = true
   )
+
+
 
 proc splitIntoWords*(text: string): seq[string] =
   ## Разбивает текст на слова (с учётом пунктуации)
@@ -473,6 +479,8 @@ proc splitIntoWords*(text: string): seq[string] =
   
   if word.len > 0:
     result.add(word)
+
+
 
 
 #==============================================================================
