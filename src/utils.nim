@@ -835,8 +835,7 @@ proc toUTF8*(text: string, encoding: Encoding): string =
 
 proc readFirstLines*(FN: string; numLines: int = DefNumLines): seq[string] =
   ## Прочитать первые numLines строк из файла с именем FN.
-  ## Если количество строк в файле меньше заданного,
-  ## то вернуть столько, сколько есть.
+  ## Если количество строк в файле меньше заданного, то вернуть столько, сколько есть.
   if not fileExists(Path(FN)): return @[]
 
   var f: File = nil
